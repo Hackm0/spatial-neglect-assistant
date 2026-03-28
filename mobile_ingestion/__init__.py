@@ -5,6 +5,7 @@ from typing import Any, Mapping
 
 from flask import Flask
 
+from mobile_ingestion.blueprints.arduino import arduino_blueprint
 from mobile_ingestion.blueprints.api import api_blueprint
 from mobile_ingestion.blueprints.ui import ui_blueprint
 from mobile_ingestion.config import AppConfig
@@ -23,6 +24,7 @@ def create_app(config: Mapping[str, Any] | AppConfig | None = None,
 
   app.register_blueprint(ui_blueprint)
   app.register_blueprint(api_blueprint)
+  app.register_blueprint(arduino_blueprint)
 
   @app.get("/health")
   def health() -> tuple[dict[str, str], int]:

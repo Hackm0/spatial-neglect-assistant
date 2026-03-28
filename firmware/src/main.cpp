@@ -1,6 +1,6 @@
 #include <Arduino.h>
-
 #include <FirmwareApplication.h>
+#include <HardwareSerialByteStream.h>
 
 namespace {
 
@@ -10,25 +10,27 @@ constexpr uint8_t kJoystickXPin = A0;
 constexpr uint8_t kJoystickYPin = A1;
 constexpr uint8_t kJoystickButtonPin = 2U;
 constexpr uint8_t kServoPin = 9U;
-constexpr uint8_t kVibrationMotorPin = 22U;
+constexpr uint8_t kVibrationMotorPin = 12U;
 
 constexpr float kServoMinAngle = 0.0F;
 constexpr float kServoMaxAngle = 180.0F;
 constexpr float kServoInitialAngle = 90.0F;
 constexpr float kServoMaxDegreesPerSecond = 90.0F;
 
-constexpr unsigned long kBaudRate = 115200UL;
+constexpr unsigned long kSerialBaudRate = 9600UL;
 constexpr unsigned long kDistanceMeasurementIntervalMs = 60UL;
 constexpr unsigned long kDistanceEchoTimeoutUs = 30000UL;
 constexpr unsigned long kSensorSampleIntervalMs = 20UL;
 constexpr unsigned long kTelemetryIntervalMs = 50UL;
-constexpr unsigned long kCommandTimeoutMs = 250UL;
+constexpr unsigned long kCommandTimeoutMs = 500UL;
 constexpr unsigned long kAccelerometerRetryIntervalMs = 1000UL;
 
 ProtocolConfig makeProtocolConfig() {
   ProtocolConfig config;
-  config.baudRate = kBaudRate;
+  config.primaryBaudRate = kSerialBaudRate;
+  config.secondaryBaudRate = kSerialBaudRate;
   config.telemetryIntervalMs = kTelemetryIntervalMs;
+  config.secondaryTelemetryIntervalMs = kTelemetryIntervalMs;
   config.commandTimeoutMs = kCommandTimeoutMs;
   return config;
 }
@@ -60,7 +62,8 @@ const FirmwareApplicationConfig kFirmwareConfig = {kDistanceSensorConfig,
                                                    kSensorSampleIntervalMs,
                                                    kAccelerometerRetryIntervalMs};
 
-FirmwareApplication firmwareApplication(kFirmwareConfig);
+HardwareSerialByteStream serialTransport(Serial);
+FirmwareApplication firmwareApplication(kFirmwareConfig, serialTransport);
 
 }  // namespace
 

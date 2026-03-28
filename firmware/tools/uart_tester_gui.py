@@ -3,13 +3,28 @@ from __future__ import annotations
 
 import argparse
 import queue
+import re
+import select
+import socket
+import subprocess
+import sys
 import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from pathlib import Path
 from tkinter import messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
-from typing import Iterable, Optional
+from typing import Iterable, Optional, Protocol
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+  sys.path.insert(0, str(ROOT))
+
+from uart_protocol import (ARDUINO_RESET_SETTLE_SECONDS, DEFAULT_BAUD_RATE,
+                           DEFAULT_KEEPALIVE_MS, NEUTRAL_SERVO_ANGLE,
+                           SERVO_MAX_ANGLE, SERVO_MIN_ANGLE, ActuatorCommand,
+                           ProtocolCodec, RawFrameEvent, TelemetrySnapshot)
 
 try:
   import serial
@@ -24,43 +39,338 @@ else:
   SERIAL_IMPORT_ERROR = None
 
 
-DEFAULT_BAUD_RATE = 115200
-DEFAULT_KEEPALIVE_MS = 50
 DEFAULT_LOG_LINES = 500
-ARDUINO_RESET_SETTLE_SECONDS = 2.0
-NEUTRAL_SERVO_ANGLE = 90.0
-SERVO_MIN_ANGLE = 0.0
-SERVO_MAX_ANGLE = 180.0
+COMMON_BAUD_RATES = (
+    9600,
+    19200,
+    38400,
+    57600,
+    115200,
+)
+DEFAULT_BLUETOOTH_RFCOMM_CHANNEL = 1
+RFCOMM_PORT_PREFIX = "/dev/rfcomm"
+RFCOMM_RESET_SETTLE_SECONDS = 0.35
+BLUETOOTHCTL_TIMEOUT_SECONDS = 5.0
+BLUETOOTH_CONNECTION_TIMEOUT_SECONDS = 4.0
+BLUETOOTH_STATE_POLL_INTERVAL_SECONDS = 0.2
+BLUETOOTH_SOCKET_CONNECT_TIMEOUT_SECONDS = 6.0
+RFCOMM_CONNECTION_TIMEOUT_SECONDS = 2.0
+RFCOMM_CONNECTION_POLL_INTERVAL_SECONDS = 0.1
+CONNECTION_HANDSHAKE_TIMEOUT_SECONDS = 4.0
+CONNECTION_HANDSHAKE_RETRY_SECONDS = 0.1
+RFCOMM_LISTING_PATTERN = re.compile(
+    r"^(rfcomm\d+):\s+([0-9A-F:]{17})\s+channel\s+(\d+)\s+(.*)$",
+    re.IGNORECASE,
+)
+BLUETOOTH_ADDRESS_PATTERN = re.compile(
+    r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})",
+    re.IGNORECASE,
+)
+BLUETOOTH_URI_PATTERN = re.compile(
+    r"^(?:bt|bluetooth)://([0-9A-F:]{17})(?:/(\d+))?$",
+    re.IGNORECASE,
+)
+BLUETOOTH_DEVICE_PATTERN = re.compile(
+    r"^Device\s+([0-9A-F:]{17})(?:\s+(.*))?$",
+    re.IGNORECASE,
+)
+ANSI_ESCAPE_PATTERN = re.compile(r"\x1B\[[0-?]*[ -/]*[@-~]")
 
 
-@dataclass(slots=True)
-class ActuatorCommand:
-  servo_angle_degrees: float
-  vibration_enabled: bool
+@dataclass(frozen=True, slots=True)
+class SerialConnectionConfig:
+  port: str
+
+  def describe(self) -> str:
+    return self.port
 
 
-@dataclass(slots=True)
-class TelemetrySnapshot:
-  distance_mm: int
-  distance_valid: bool
-  distance_timed_out: bool
-  accel_x_mg: int
-  accel_y_mg: int
-  accel_z_mg: int
-  accel_valid: bool
-  joystick_x_permille: int
-  joystick_y_permille: int
-  joystick_button_pressed: bool
+@dataclass(frozen=True, slots=True)
+class BluetoothConnectionConfig:
+  address: str
+  channel: int = DEFAULT_BLUETOOTH_RFCOMM_CHANNEL
+  device_name: Optional[str] = None
+
+  def describe(self) -> str:
+    if self.device_name:
+      return f"{self.device_name} [{self.address}]"
+    return f"Bluetooth {self.address}"
 
 
-@dataclass(slots=True)
-class RawFrameEvent:
-  direction: str
-  message_type: Optional[int]
-  sequence: Optional[int]
-  hex_string: str
-  timestamp: float
-  status: str
+@dataclass(frozen=True, slots=True)
+class RfcommBinding:
+  port: str
+  address: str
+  channel: int
+  state: str
+
+
+@dataclass(frozen=True, slots=True)
+class BluetoothDeviceInfo:
+  address: str
+  name: str
+
+  def format_option(self) -> str:
+    if self.name:
+      return f"{self.name} [{self.address}]"
+    return f"Bluetooth [{self.address}]"
+
+
+ConnectionConfig = SerialConnectionConfig | BluetoothConnectionConfig
+
+
+class ByteStreamPort(Protocol):
+  in_waiting: int
+
+  def read(self, size: int) -> bytes:
+    raise NotImplementedError
+
+  def write(self, data: bytes) -> int:
+    raise NotImplementedError
+
+  def close(self) -> None:
+    raise NotImplementedError
+
+  def reset_input_buffer(self) -> None:
+    raise NotImplementedError
+
+  def reset_output_buffer(self) -> None:
+    raise NotImplementedError
+
+
+def normalize_port_name(port: str) -> str:
+  normalized_port = port.strip()
+  if re.fullmatch(r"rfcomm\d+", normalized_port, re.IGNORECASE):
+    return f"/dev/{normalized_port.lower()}"
+  return normalized_port
+
+
+def build_connection_config(port: str) -> ConnectionConfig:
+  normalized_port = normalize_port_name(port)
+  if not normalized_port:
+    raise ValueError("Enter a port before connecting.")
+
+  bluetooth_uri_match = BLUETOOTH_URI_PATTERN.match(normalized_port)
+  if bluetooth_uri_match is not None:
+    channel = DEFAULT_BLUETOOTH_RFCOMM_CHANNEL
+    if bluetooth_uri_match.group(2) is not None:
+      channel = int(bluetooth_uri_match.group(2), 10)
+      if channel <= 0:
+        raise ValueError("Bluetooth RFCOMM channel must be greater than zero.")
+    return BluetoothConnectionConfig(
+        address=bluetooth_uri_match.group(1).upper(),
+        channel=channel,
+    )
+
+  bluetooth_address_match = BLUETOOTH_ADDRESS_PATTERN.search(normalized_port)
+  if bluetooth_address_match is not None:
+    label_prefix = normalized_port[:bluetooth_address_match.start()].strip()
+    label_prefix = label_prefix.rstrip("[(").strip()
+    if label_prefix.lower().startswith("bluetooth "):
+      label_prefix = label_prefix[len("bluetooth "):].strip()
+    if label_prefix.lower().startswith("bt "):
+      label_prefix = label_prefix[len("bt "):].strip()
+    return BluetoothConnectionConfig(
+        address=bluetooth_address_match.group(1).upper(),
+        device_name=label_prefix or None,
+    )
+
+  return SerialConnectionConfig(port=normalized_port)
+
+
+def parse_baud_rate(baud_rate: str) -> int:
+  normalized_baud_rate = baud_rate.strip()
+  if not normalized_baud_rate:
+    raise ValueError("Enter a baud rate before connecting.")
+
+  try:
+    parsed_baud_rate = int(normalized_baud_rate, 10)
+  except ValueError as exc:
+    raise ValueError("Enter a valid integer baud rate.") from exc
+
+  if parsed_baud_rate <= 0:
+    raise ValueError("Enter a baud rate greater than zero.")
+
+  return parsed_baud_rate
+
+
+def is_rfcomm_port(port_name: str) -> bool:
+  return port_name.startswith(RFCOMM_PORT_PREFIX)
+
+
+def connection_reset_settle_seconds(port_name: str) -> float:
+  if is_rfcomm_port(port_name):
+    return 0.0
+
+  return ARDUINO_RESET_SETTLE_SECONDS
+
+
+def parse_rfcomm_bindings(rfcomm_output: str) -> dict[str, RfcommBinding]:
+  bindings: dict[str, RfcommBinding] = {}
+  for line in rfcomm_output.splitlines():
+    match = RFCOMM_LISTING_PATTERN.match(line.strip())
+    if match is None:
+      continue
+
+    device_name, address, channel_text, state = match.groups()
+    bindings[f"/dev/{device_name}"] = RfcommBinding(
+        port=f"/dev/{device_name}",
+        address=address.upper(),
+        channel=int(channel_text, 10),
+        state=state.strip(),
+    )
+
+  return bindings
+
+
+def strip_ansi_escape_sequences(text: str) -> str:
+  return ANSI_ESCAPE_PATTERN.sub("", text)
+
+
+def parse_bluetooth_devices(
+    bluetoothctl_output: str) -> dict[str, BluetoothDeviceInfo]:
+  devices: dict[str, BluetoothDeviceInfo] = {}
+  sanitized_output = strip_ansi_escape_sequences(bluetoothctl_output)
+  for line in sanitized_output.splitlines():
+    match = BLUETOOTH_DEVICE_PATTERN.match(line.strip())
+    if match is None:
+      continue
+
+    address = match.group(1).upper()
+    device_name = (match.group(2) or "").strip()
+    devices[address] = BluetoothDeviceInfo(address=address, name=device_name)
+
+  return devices
+
+
+def parse_bluetooth_connected(bluetoothctl_output: str) -> Optional[bool]:
+  sanitized_output = strip_ansi_escape_sequences(bluetoothctl_output)
+  match = re.search(r"Connected:\s+(yes|no)", sanitized_output, re.IGNORECASE)
+  if match is None:
+    return None
+
+  return match.group(1).lower() == "yes"
+
+
+class BluetoothSocketPort:
+  _READY_READ_SIZE = 4096
+
+  def __init__(self,
+               address: str,
+               channel: int,
+               timeout_seconds: float = 0.01,
+               write_timeout_seconds: float = 0.25) -> None:
+    if not hasattr(socket, "AF_BLUETOOTH") or not hasattr(
+        socket, "BTPROTO_RFCOMM"):
+      raise OSError("Bluetooth RFCOMM sockets are unavailable on this platform.")
+
+    self._read_timeout_seconds = timeout_seconds
+    self._write_timeout_seconds = write_timeout_seconds
+    self._socket = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM,
+                                 socket.BTPROTO_RFCOMM)
+    self._socket.settimeout(BLUETOOTH_SOCKET_CONNECT_TIMEOUT_SECONDS)
+    self._socket.connect((address, channel))
+    self._socket.settimeout(self._read_timeout_seconds)
+
+  @property
+  def in_waiting(self) -> int:
+    readable, _, _ = select.select([self._socket], [], [], 0.0)
+    return self._READY_READ_SIZE if readable else 0
+
+  def read(self, size: int) -> bytes:
+    try:
+      self._socket.settimeout(self._read_timeout_seconds)
+      return self._socket.recv(max(1, size))
+    except socket.timeout:
+      return b""
+
+  def write(self, data: bytes) -> int:
+    self._socket.settimeout(self._write_timeout_seconds)
+    self._socket.sendall(data)
+    self._socket.settimeout(self._read_timeout_seconds)
+    return len(data)
+
+  def reset_input_buffer(self) -> None:
+    self._socket.setblocking(False)
+    try:
+      while True:
+        try:
+          chunk = self._socket.recv(self._READY_READ_SIZE)
+        except BlockingIOError:
+          break
+        if not chunk:
+          break
+    finally:
+      self._socket.settimeout(self._read_timeout_seconds)
+
+  def reset_output_buffer(self) -> None:
+    return
+
+  def close(self) -> None:
+    self._socket.close()
+
+
+def list_bluetooth_device_options() -> list[str]:
+  try:
+    result = subprocess.run(
+        ["bluetoothctl", "devices"],
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+        check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return []
+
+  combined_output = "\n".join(
+      text.strip() for text in (result.stdout, result.stderr) if text.strip())
+  devices = parse_bluetooth_devices(combined_output)
+  return [
+      device.format_option() for device in sorted(
+          devices.values(),
+          key=lambda device: ((device.name or device.address).lower(),
+                              device.address),
+      )
+  ]
+
+
+def lookup_rfcomm_binding(port_name: str) -> Optional[RfcommBinding]:
+  try:
+    result = subprocess.run(
+        ["rfcomm"],
+        capture_output=True,
+        text=True,
+        timeout=2.0,
+        check=False,
+    )
+  except (OSError, subprocess.SubprocessError):
+    return None
+
+  bindings = parse_rfcomm_bindings(result.stdout)
+  return bindings.get(port_name)
+
+
+def is_bluetooth_connection(connection: ConnectionConfig) -> bool:
+  if isinstance(connection, BluetoothConnectionConfig):
+    return True
+  return is_rfcomm_port(connection.port)
+
+
+def resolve_connection_config(connection: ConnectionConfig) -> ConnectionConfig:
+  if isinstance(connection, BluetoothConnectionConfig):
+    return connection
+
+  if not is_rfcomm_port(connection.port):
+    return connection
+
+  binding = lookup_rfcomm_binding(connection.port)
+  if binding is None:
+    return connection
+
+  if not hasattr(socket, "AF_BLUETOOTH") or not hasattr(socket, "BTPROTO_RFCOMM"):
+    return connection
+
+  return BluetoothConnectionConfig(address=binding.address, channel=binding.channel)
 
 
 @dataclass(slots=True)
@@ -70,260 +380,16 @@ class WorkerStatus:
   tx_count: int
   rx_count: int
   invalid_frame_count: int
-  port: str
+  connection_label: str
   detail: str
 
 
-@dataclass(slots=True)
-class ParsedFrame:
-  message_type: int
-  sequence: int
-  payload: bytes
-  frame_bytes: bytes
-
-
-class ProtocolCodec:
-  SYNC_BYTE_1 = 0xA5
-  SYNC_BYTE_2 = 0x5A
-  PROTOCOL_VERSION = 0x01
-  MESSAGE_TYPE_ACTUATOR_COMMAND = 0x01
-  MESSAGE_TYPE_TELEMETRY_SNAPSHOT = 0x81
-
-  ACTUATOR_COMMAND_PAYLOAD_LENGTH = 3
-  TELEMETRY_SNAPSHOT_PAYLOAD_LENGTH = 14
-  MAX_PAYLOAD_LENGTH = 32
-
-  VIBRATION_ENABLED_FLAG_MASK = 0x01
-  JOYSTICK_BUTTON_PRESSED_FLAG_MASK = 0x01
-  DISTANCE_VALID_FLAG_MASK = 0x01
-  DISTANCE_TIMED_OUT_FLAG_MASK = 0x02
-  ACCELEROMETER_VALID_FLAG_MASK = 0x04
-
-  _STATE_WAIT_SYNC_1 = 0
-  _STATE_WAIT_SYNC_2 = 1
-  _STATE_READ_VERSION = 2
-  _STATE_READ_TYPE = 3
-  _STATE_READ_SEQUENCE = 4
-  _STATE_READ_LENGTH = 5
-  _STATE_READ_PAYLOAD = 6
-  _STATE_READ_CRC_LOW = 7
-  _STATE_READ_CRC_HIGH = 8
-
-  def __init__(self) -> None:
-    self.reset_parser()
-
-  @staticmethod
-  def clamp_servo_angle(angle_degrees: float) -> float:
-    if angle_degrees < SERVO_MIN_ANGLE:
-      return SERVO_MIN_ANGLE
-    if angle_degrees > SERVO_MAX_ANGLE:
-      return SERVO_MAX_ANGLE
-    return angle_degrees
-
-  @staticmethod
-  def bytes_to_hex(data: bytes) -> str:
-    return " ".join(f"{byte:02X}" for byte in data)
-
-  @staticmethod
-  def format_message_type(message_type: Optional[int]) -> str:
-    if message_type is None:
-      return "--"
-    if message_type == ProtocolCodec.MESSAGE_TYPE_ACTUATOR_COMMAND:
-      return "0x01"
-    if message_type == ProtocolCodec.MESSAGE_TYPE_TELEMETRY_SNAPSHOT:
-      return "0x81"
-    return f"0x{message_type:02X}"
-
-  @staticmethod
-  def calculate_crc(data: bytes) -> int:
-    crc = 0xFFFF
-    for byte in data:
-      crc ^= byte << 8
-      for _ in range(8):
-        if (crc & 0x8000) != 0:
-          crc = ((crc << 1) ^ 0x1021) & 0xFFFF
-        else:
-          crc = (crc << 1) & 0xFFFF
-    return crc
-
-  def encode_actuator_command_frame(self, command: ActuatorCommand,
-                                    sequence: int) -> bytes:
-    clamped_angle = self.clamp_servo_angle(command.servo_angle_degrees)
-    servo_tenths = int((clamped_angle * 10.0) + 0.5)
-    payload = bytearray(self.ACTUATOR_COMMAND_PAYLOAD_LENGTH)
-    payload[0:2] = servo_tenths.to_bytes(2, byteorder="little", signed=False)
-    payload[2] = (self.VIBRATION_ENABLED_FLAG_MASK
-                  if command.vibration_enabled else 0)
-    return self._encode_frame(self.MESSAGE_TYPE_ACTUATOR_COMMAND, sequence,
-                              bytes(payload))
-
-  def decode_telemetry_payload(self, payload: bytes) -> TelemetrySnapshot:
-    if len(payload) != self.TELEMETRY_SNAPSHOT_PAYLOAD_LENGTH:
-      raise ValueError(
-          f"expected {self.TELEMETRY_SNAPSHOT_PAYLOAD_LENGTH} payload bytes")
-
-    distance_mm = int.from_bytes(payload[0:2], byteorder="little", signed=False)
-    accel_x_mg = int.from_bytes(payload[2:4], byteorder="little", signed=True)
-    accel_y_mg = int.from_bytes(payload[4:6], byteorder="little", signed=True)
-    accel_z_mg = int.from_bytes(payload[6:8], byteorder="little", signed=True)
-    joystick_x_permille = int.from_bytes(payload[8:10], byteorder="little",
-                                         signed=True)
-    joystick_y_permille = int.from_bytes(payload[10:12], byteorder="little",
-                                         signed=True)
-    button_flags = payload[12]
-    sensor_flags = payload[13]
-
-    distance_valid = (sensor_flags & self.DISTANCE_VALID_FLAG_MASK) != 0
-    distance_timed_out = (sensor_flags & self.DISTANCE_TIMED_OUT_FLAG_MASK) != 0
-    accel_valid = (sensor_flags & self.ACCELEROMETER_VALID_FLAG_MASK) != 0
-
-    return TelemetrySnapshot(
-        distance_mm=distance_mm if distance_valid else 0,
-        distance_valid=distance_valid,
-        distance_timed_out=distance_timed_out,
-        accel_x_mg=accel_x_mg if accel_valid else 0,
-        accel_y_mg=accel_y_mg if accel_valid else 0,
-        accel_z_mg=accel_z_mg if accel_valid else 0,
-        accel_valid=accel_valid,
-        joystick_x_permille=joystick_x_permille,
-        joystick_y_permille=joystick_y_permille,
-        joystick_button_pressed=(button_flags &
-                                 self.JOYSTICK_BUTTON_PRESSED_FLAG_MASK) != 0,
-    )
-
-  def feed_bytes(self, incoming_bytes: bytes
-                 ) -> tuple[list[ParsedFrame], list[RawFrameEvent]]:
-    frames: list[ParsedFrame] = []
-    errors: list[RawFrameEvent] = []
-
-    for byte in incoming_bytes:
-      if self._parser_state == self._STATE_WAIT_SYNC_1:
-        if byte == self.SYNC_BYTE_1:
-          self._frame_prefix = bytearray((self.SYNC_BYTE_1,))
-          self._parser_state = self._STATE_WAIT_SYNC_2
-        continue
-
-      if self._parser_state == self._STATE_WAIT_SYNC_2:
-        if byte == self.SYNC_BYTE_2:
-          self._frame_prefix.append(byte)
-          self._parser_state = self._STATE_READ_VERSION
-        elif byte == self.SYNC_BYTE_1:
-          self._frame_prefix = bytearray((self.SYNC_BYTE_1,))
-        else:
-          self.reset_parser()
-        continue
-
-      self._frame_prefix.append(byte)
-
-      if self._parser_state == self._STATE_READ_VERSION:
-        if byte != self.PROTOCOL_VERSION:
-          errors.append(self._make_error_event("bad version"))
-          self.reset_parser()
-          continue
-
-        self._frame_data = bytearray((byte,))
-        self._parser_state = self._STATE_READ_TYPE
-        continue
-
-      if self._parser_state == self._STATE_READ_TYPE:
-        self._parsed_message_type = byte
-        self._frame_data.append(byte)
-        self._parser_state = self._STATE_READ_SEQUENCE
-        continue
-
-      if self._parser_state == self._STATE_READ_SEQUENCE:
-        self._parsed_sequence = byte
-        self._frame_data.append(byte)
-        self._parser_state = self._STATE_READ_LENGTH
-        continue
-
-      if self._parser_state == self._STATE_READ_LENGTH:
-        if byte > self.MAX_PAYLOAD_LENGTH:
-          errors.append(self._make_error_event("payload length too large"))
-          self.reset_parser()
-          continue
-
-        self._parsed_payload_length = byte
-        self._frame_data.append(byte)
-        self._payload_buffer = bytearray()
-        if byte == 0:
-          self._parser_state = self._STATE_READ_CRC_LOW
-        else:
-          self._parser_state = self._STATE_READ_PAYLOAD
-        continue
-
-      if self._parser_state == self._STATE_READ_PAYLOAD:
-        self._payload_buffer.append(byte)
-        self._frame_data.append(byte)
-        if len(self._payload_buffer) >= self._parsed_payload_length:
-          self._parser_state = self._STATE_READ_CRC_LOW
-        continue
-
-      if self._parser_state == self._STATE_READ_CRC_LOW:
-        self._received_crc = byte
-        self._parser_state = self._STATE_READ_CRC_HIGH
-        continue
-
-      if self._parser_state == self._STATE_READ_CRC_HIGH:
-        self._received_crc |= byte << 8
-        expected_crc = self.calculate_crc(bytes(self._frame_data))
-        if self._received_crc != expected_crc:
-          errors.append(self._make_error_event("bad CRC"))
-          self.reset_parser()
-          continue
-
-        frames.append(
-            ParsedFrame(
-                message_type=self._parsed_message_type,
-                sequence=self._parsed_sequence,
-                payload=bytes(self._payload_buffer),
-                frame_bytes=bytes(self._frame_prefix),
-            ))
-        self.reset_parser()
-
-    return frames, errors
-
-  def reset_parser(self) -> None:
-    self._parser_state = self._STATE_WAIT_SYNC_1
-    self._parsed_message_type = 0
-    self._parsed_sequence = 0
-    self._parsed_payload_length = 0
-    self._payload_buffer = bytearray()
-    self._frame_data = bytearray()
-    self._frame_prefix = bytearray()
-    self._received_crc = 0
-
-  def _encode_frame(self, message_type: int, sequence: int,
-                    payload: bytes) -> bytes:
-    if len(payload) > self.MAX_PAYLOAD_LENGTH:
-      raise ValueError("payload too large")
-
-    header = bytes((
-        self.PROTOCOL_VERSION,
-        message_type & 0xFF,
-        sequence & 0xFF,
-        len(payload),
-    ))
-    crc = self.calculate_crc(header + payload)
-    return bytes((self.SYNC_BYTE_1, self.SYNC_BYTE_2)) + header + payload + (
-        crc.to_bytes(2, byteorder="little", signed=False))
-
-  def _make_error_event(self, status: str) -> RawFrameEvent:
-    return RawFrameEvent(
-        direction="rx",
-        message_type=None,
-        sequence=None,
-        hex_string=self.bytes_to_hex(bytes(self._frame_prefix)),
-        timestamp=time.time(),
-        status=status,
-    )
-
-
 class SerialWorker(threading.Thread):
-  def __init__(self, port: str, baud_rate: int, keepalive_ms: int,
+  def __init__(self, connection: ConnectionConfig, baud_rate: int,
+               keepalive_ms: int,
                event_queue: "queue.Queue[object]") -> None:
     super().__init__(daemon=True, name="uart-tester-serial-worker")
-    self._port = port
+    self._connection = connection
     self._baud_rate = baud_rate
     self._keepalive_seconds = keepalive_ms / 1000.0
     self._event_queue = event_queue
@@ -336,6 +402,8 @@ class SerialWorker(threading.Thread):
     self._tx_count = 0
     self._rx_count = 0
     self._invalid_frame_count = 0
+    self._link_active = False
+    self._protocol_ready = False
     self._command_dirty.set()
 
   def update_command(self, command: ActuatorCommand) -> None:
@@ -352,29 +420,46 @@ class SerialWorker(threading.Thread):
     self._stop_requested.set()
 
   def run(self) -> None:
-    if serial is None:
+    if serial is None and not isinstance(self._connection,
+                                         BluetoothConnectionConfig):
       self._publish_log("system", None, None, "",
                         f"pyserial unavailable: {SERIAL_IMPORT_ERROR}")
       self._publish_status(False, False, "pyserial unavailable")
       return
 
-    serial_port = None
+    serial_port: Optional[ByteStreamPort] = None
     try:
-      serial_port = serial.Serial(
-          port=self._port,
-          baudrate=self._baud_rate,
-          timeout=0.01,
-          write_timeout=0.25,
-      )
-      # Opening the Mega USB serial port resets the board. Give the bootloader
-      # time to finish so we start from a clean protocol stream.
-      time.sleep(ARDUINO_RESET_SETTLE_SECONDS)
-      serial_port.reset_input_buffer()
-      serial_port.reset_output_buffer()
+      self._link_active = False
+      self._protocol_ready = False
+      self._prepare_connection()
+      serial_port = self._open_connection_port(self._connection)
+      self._confirm_connection_ready()
+
+      settle_seconds = self._connection_reset_settle_seconds()
+      if settle_seconds > 0.0:
+        # Opening the Arduino USB serial port resets the board. Give the
+        # bootloader time to finish so we start from a clean protocol stream
+        # before we begin the keepalive loop.
+        time.sleep(settle_seconds)
+      self._reset_serial_port(serial_port,
+                              allow_failure=is_bluetooth_connection(
+                                  self._connection))
+      self._link_active = True
       self._command_dirty.set()
-      self._publish_log("system", None, None, "",
-                        f"opened serial port {self._port} and waited for reset")
-      self._publish_status(True, True, f"connected to {self._port}")
+      self._publish_log(
+          "system",
+          None,
+          None,
+          "",
+          self._opened_connection_message(),
+      )
+      self._publish_status(True, True, "awaiting telemetry handshake")
+      handshake_completed = self._perform_connection_handshake(
+          serial_port, allow_timeout=is_bluetooth_connection(self._connection))
+      if handshake_completed:
+        self._publish_status(True, True, "connected")
+      elif is_bluetooth_connection(self._connection):
+        self._publish_status(True, True, "Bluetooth link active, awaiting telemetry")
 
       next_keepalive_deadline = time.monotonic()
       while not self._stop_requested.is_set():
@@ -383,50 +468,7 @@ class SerialWorker(threading.Thread):
           self._send_current_command(serial_port)
           next_keepalive_deadline = time.monotonic() + self._keepalive_seconds
 
-        incoming_bytes = self._read_available_bytes(serial_port)
-        if incoming_bytes:
-          parsed_frames, parse_errors = self._codec.feed_bytes(incoming_bytes)
-          for error_event in parse_errors:
-            self._invalid_frame_count += 1
-            self._event_queue.put(error_event)
-            self._publish_status(True, True, "received invalid frame")
-
-          for parsed_frame in parsed_frames:
-            self._rx_count += 1
-            self._publish_log(
-                "rx",
-                parsed_frame.message_type,
-                parsed_frame.sequence,
-                ProtocolCodec.bytes_to_hex(parsed_frame.frame_bytes),
-                "ok",
-            )
-            if parsed_frame.message_type != ProtocolCodec.MESSAGE_TYPE_TELEMETRY_SNAPSHOT:
-              self._publish_log(
-                  "rx",
-                  parsed_frame.message_type,
-                  parsed_frame.sequence,
-                  "",
-                  "unknown message type",
-              )
-              self._publish_status(True, True, "received unknown frame")
-              continue
-
-            try:
-              snapshot = self._codec.decode_telemetry_payload(parsed_frame.payload)
-            except ValueError as exc:
-              self._invalid_frame_count += 1
-              self._publish_log(
-                  "rx",
-                  parsed_frame.message_type,
-                  parsed_frame.sequence,
-                  "",
-                  f"decode error: {exc}",
-              )
-              self._publish_status(True, True, "telemetry decode error")
-              continue
-
-            self._event_queue.put(snapshot)
-            self._publish_status(True, True, "telemetry updated")
+        self._process_incoming_bytes(serial_port)
     except (OSError, SerialException) as exc:
       self._publish_log("system", None, None, "", f"serial error: {exc}")
       self._publish_status(False, False, f"serial error: {exc}")
@@ -439,39 +481,371 @@ class SerialWorker(threading.Thread):
         except (OSError, SerialException):
           pass
 
-        try:
-          serial_port.close()
-        except (OSError, SerialException):
-          pass
+      self._close_serial_port(serial_port)
+      self._cleanup_connection()
+      self._link_active = False
+      self._protocol_ready = False
 
       self._publish_log("system", None, None, "", "serial worker stopped")
       self._publish_status(False, False, "disconnected")
 
-  def _read_available_bytes(self, serial_port: "serial.Serial") -> bytes:
+  def _prepare_connection(self) -> None:
+    if isinstance(self._connection, BluetoothConnectionConfig):
+      self._publish_log(
+          "system",
+          None,
+          None,
+          "",
+          (f"opening direct Bluetooth RFCOMM link to "
+           f"{self._connection.address} channel {self._connection.channel}"),
+      )
+      return
+
+    if not is_rfcomm_port(self._connection.port):
+      return
+
+    binding = self._lookup_rfcomm_binding(self._connection.port)
+    if binding is None:
+      self._publish_log("system", None, None, "",
+                        "rfcomm binding not found; continuing with direct port open")
+      return
+
+    self._publish_log(
+        "system",
+        None,
+        None,
+        "",
+        f"using bound Bluetooth port {binding.port} for {binding.address}",
+    )
+    if "connected" not in binding.state.lower():
+      self._request_bluetooth_connect(binding.address)
+    self._warm_up_rfcomm_port()
+
+  def _confirm_connection_ready(self) -> None:
+    if isinstance(self._connection, BluetoothConnectionConfig):
+      connected = self._query_bluetooth_connection_state(self._connection.address)
+      if connected:
+        self._publish_log(
+            "system",
+            None,
+            None,
+            "",
+            (f"confirmed direct Bluetooth RFCOMM link active on "
+             f"{self._connection.address}"),
+        )
+      else:
+        self._publish_log(
+            "system",
+            None,
+            None,
+            "",
+            (f"opened direct Bluetooth RFCOMM socket to "
+             f"{self._connection.address}"),
+        )
+      return
+
+    if not is_rfcomm_port(self._connection.port):
+      return
+
+    binding = self._lookup_rfcomm_binding(self._connection.port)
+    if binding is not None and "connected" in binding.state.lower():
+      self._publish_log(
+          "system",
+          None,
+          None,
+          "",
+          f"confirmed Bluetooth serial link active on {binding.port}: {binding.state}",
+      )
+      return
+
+    self._publish_log(
+        "system",
+        None,
+        None,
+        "",
+        (f"RFCOMM state was not confirmed for {self._connection.port}; "
+         "continuing with opened serial port"),
+    )
+
+  def _cleanup_connection(self) -> None:
+    return
+
+  @staticmethod
+  def _run_command(arguments: list[str],
+                   input_text: Optional[str] = None,
+                   timeout_seconds: float = BLUETOOTHCTL_TIMEOUT_SECONDS
+                   ) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        arguments,
+        input=input_text,
+        capture_output=True,
+        text=True,
+        timeout=timeout_seconds,
+        check=False,
+    )
+
+  def _lookup_rfcomm_binding(self, port_name: str) -> Optional[RfcommBinding]:
+    try:
+      result = self._run_command(["rfcomm"], timeout_seconds=2.0)
+    except (OSError, subprocess.SubprocessError) as exc:
+      self._publish_log("system", None, None, "",
+                        f"rfcomm lookup failed: {exc}")
+      return None
+
+    bindings = parse_rfcomm_bindings(result.stdout)
+    binding = bindings.get(port_name)
+    if binding is None and result.stderr.strip():
+      self._publish_log("system", None, None, "", result.stderr.strip())
+    return binding
+
+  def _request_bluetooth_disconnect(self, address: str) -> None:
+    self._run_bluetoothctl_command(
+        f"disconnect {address}",
+        f"requested Bluetooth disconnect from {address}",
+    )
+
+  def _request_bluetooth_connect(self, address: str) -> bool:
+    self._run_bluetoothctl_command(
+        f"connect {address}",
+        f"requested Bluetooth reconnect to {address}",
+    )
+    connected = self._wait_for_bluetooth_connection_state(address, True)
+    if connected:
+      self._publish_log("system", None, None, "",
+                        f"confirmed Bluetooth connected to {address}")
+    else:
+      self._publish_log("system", None, None, "",
+                        f"Bluetooth connection to {address} was not confirmed")
+    return connected
+
+  def _wait_for_bluetooth_connection_state(self, address: str,
+                                           expected_state: bool) -> bool:
+    deadline = time.monotonic() + BLUETOOTH_CONNECTION_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+      connected = self._query_bluetooth_connection_state(address)
+      if connected is expected_state:
+        return True
+      time.sleep(BLUETOOTH_STATE_POLL_INTERVAL_SECONDS)
+
+    return False
+
+  def _query_bluetooth_connection_state(self, address: str) -> Optional[bool]:
+    try:
+      result = self._run_command(["bluetoothctl"],
+                                 input_text=f"info {address}\nquit\n")
+    except (OSError, subprocess.SubprocessError) as exc:
+      self._publish_log("system", None, None, "",
+                        f"bluetoothctl info failed: {exc}")
+      return None
+
+    combined_output = self._combine_command_output(result.stdout, result.stderr)
+    return parse_bluetooth_connected(combined_output)
+
+  def _run_bluetoothctl_command(self, command: str, success_message: str) -> None:
+    try:
+      result = self._run_command(["bluetoothctl"],
+                                 input_text=f"{command}\nquit\n")
+    except (OSError, subprocess.SubprocessError) as exc:
+      self._publish_log("system", None, None, "",
+                        f"bluetoothctl failed: {exc}")
+      return
+
+    combined_output = self._combine_command_output(result.stdout, result.stderr)
+    normalized_output = combined_output.lower()
+    command_failed = result.returncode != 0 or "failed" in normalized_output
+    command_failed = command_failed or "not available" in normalized_output
+    command_failed = command_failed or "no default controller available" in normalized_output
+    if command_failed:
+      if combined_output:
+        self._publish_log("system", None, None, "", combined_output)
+      return
+
+    if combined_output:
+      self._publish_log("system", None, None, "", combined_output)
+    self._publish_log("system", None, None, "", success_message)
+
+  @staticmethod
+  def _combine_command_output(stdout_text: str, stderr_text: str) -> str:
+    combined_output = "\n".join(
+        text.strip() for text in (stdout_text, stderr_text) if text.strip())
+    return strip_ansi_escape_sequences(combined_output)
+
+  def _warm_up_rfcomm_port(self) -> None:
+    warmup_port = None
+    try:
+      warmup_port = self._open_connection_port(self._connection)
+      self._publish_log("system", None, None, "",
+                        "performed Bluetooth serial warm-up open")
+      time.sleep(RFCOMM_RESET_SETTLE_SECONDS)
+      self._reset_serial_port(warmup_port, allow_failure=True)
+    except (OSError, SerialException) as exc:
+      self._publish_log("system", None, None, "",
+                        f"Bluetooth warm-up open failed: {exc}")
+    finally:
+      self._close_serial_port(warmup_port)
+      time.sleep(RFCOMM_RESET_SETTLE_SECONDS)
+
+  def _open_connection_port(self, connection: ConnectionConfig) -> ByteStreamPort:
+    if isinstance(connection, BluetoothConnectionConfig):
+      return BluetoothSocketPort(connection.address, connection.channel)
+
+    if serial is None:
+      raise SerialException(f"pyserial unavailable: {SERIAL_IMPORT_ERROR}")
+    return serial.Serial(
+        port=connection.port,
+        baudrate=self._baud_rate,
+        timeout=0.01,
+        write_timeout=0.25,
+    )
+
+  def _connection_reset_settle_seconds(self) -> float:
+    if isinstance(self._connection, BluetoothConnectionConfig):
+      return 0.0
+    return connection_reset_settle_seconds(self._connection.port)
+
+  def _opened_connection_message(self) -> str:
+    if isinstance(self._connection, BluetoothConnectionConfig):
+      return (f"opened {self._connection.describe()} via Bluetooth RFCOMM "
+              f"channel {self._connection.channel}")
+    return f"opened {self._connection.describe()} at {self._baud_rate} baud"
+
+  def _reset_serial_port(self,
+                         serial_port: ByteStreamPort,
+                         allow_failure: bool = False) -> None:
+    try:
+      serial_port.reset_input_buffer()
+      serial_port.reset_output_buffer()
+    except Exception as exc:
+      if allow_failure:
+        self._publish_log("system", None, None, "",
+                          f"serial buffer reset skipped: {exc}")
+        return
+      raise SerialException(f"serial buffer reset failed: {exc}") from exc
+
+  @staticmethod
+  def _close_serial_port(serial_port: Optional[ByteStreamPort]) -> None:
+    if serial_port is None:
+      return
+
+    try:
+      serial_port.close()
+    except (OSError, SerialException):
+      pass
+
+  def _read_available_bytes(self, serial_port: ByteStreamPort) -> bytes:
     bytes_waiting = getattr(serial_port, "in_waiting", 0)
     read_size = bytes_waiting if bytes_waiting > 0 else 1
     return bytes(serial_port.read(read_size))
 
-  def _send_current_command(self, serial_port: "serial.Serial") -> None:
+  def _perform_connection_handshake(self,
+                                    serial_port: ByteStreamPort,
+                                    allow_timeout: bool = False) -> bool:
+    deadline = time.monotonic() + CONNECTION_HANDSHAKE_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+      if self._stop_requested.is_set():
+        raise SerialException("connection cancelled")
+
+      self._send_current_command(serial_port)
+      if self._process_incoming_bytes(serial_port):
+        return True
+
+      time.sleep(CONNECTION_HANDSHAKE_RETRY_SECONDS)
+
+    if allow_timeout:
+      self._publish_log(
+          "system",
+          None,
+          None,
+          "",
+          "telemetry handshake timed out; keeping serial link open",
+      )
+      return False
+
+    raise SerialException("connection handshake failed: no telemetry received")
+
+  def _process_incoming_bytes(self, serial_port: ByteStreamPort) -> bool:
+    incoming_bytes = self._read_available_bytes(serial_port)
+    if not incoming_bytes:
+      return False
+
+    parsed_frames, parse_errors = self._codec.feed_bytes(incoming_bytes)
+    for error_event in parse_errors:
+      self._invalid_frame_count += 1
+      self._publish_log(
+          "rx",
+          error_event.message_type,
+          error_event.sequence,
+          error_event.hex_string,
+          error_event.status,
+      )
+      self._publish_status(self._link_active, True, "received invalid frame")
+
+    received_telemetry = False
+    for parsed_frame in parsed_frames:
+      self._rx_count += 1
+      self._publish_log(
+          "rx",
+          parsed_frame.message_type,
+          parsed_frame.sequence,
+          ProtocolCodec.bytes_to_hex(parsed_frame.frame_bytes),
+          "ok",
+      )
+      if parsed_frame.message_type != ProtocolCodec.MESSAGE_TYPE_TELEMETRY_SNAPSHOT:
+        self._publish_log(
+            "rx",
+            parsed_frame.message_type,
+            parsed_frame.sequence,
+            "",
+            "unknown message type",
+        )
+        self._publish_status(self._link_active, True, "received unknown frame")
+        continue
+
+      try:
+        snapshot = self._codec.decode_telemetry_payload(parsed_frame.payload)
+      except ValueError as exc:
+        self._invalid_frame_count += 1
+        self._publish_log(
+            "rx",
+            parsed_frame.message_type,
+            parsed_frame.sequence,
+            "",
+            f"decode error: {exc}",
+        )
+        self._publish_status(self._link_active, True, "telemetry decode error")
+        continue
+
+      self._protocol_ready = True
+      self._event_queue.put(snapshot)
+      self._publish_status(self._link_active, True, "telemetry updated")
+      received_telemetry = True
+
+    return received_telemetry
+
+  def _send_current_command(self, serial_port: ByteStreamPort) -> None:
     with self._command_lock:
       command = ActuatorCommand(self._current_command.servo_angle_degrees,
                                 self._current_command.vibration_enabled)
     self._write_command(serial_port, command, log_status="ok")
     self._command_dirty.clear()
 
-  def _write_command(self, serial_port: "serial.Serial", command: ActuatorCommand,
+  def _write_command(self, serial_port: ByteStreamPort, command: ActuatorCommand,
                      log_status: str) -> None:
     frame = self._codec.encode_actuator_command_frame(command, self._tx_sequence)
     written = serial_port.write(frame)
     if written != len(frame):
       raise SerialException(
           f"short write: expected {len(frame)} bytes, wrote {written}")
-    self._publish_log("tx", ProtocolCodec.MESSAGE_TYPE_ACTUATOR_COMMAND,
+    self._publish_log("tx",
+                      ProtocolCodec.MESSAGE_TYPE_ACTUATOR_COMMAND,
                       self._tx_sequence, ProtocolCodec.bytes_to_hex(frame),
                       log_status)
     self._tx_sequence = (self._tx_sequence + 1) & 0xFF
     self._tx_count += 1
-    self._publish_status(True, True, "command sent")
+    status_detail = "command sent"
+    if self._link_active and not self._protocol_ready:
+      status_detail = "command sent, awaiting telemetry"
+    self._publish_status(self._link_active, True, status_detail)
 
   def _publish_log(self, direction: str, message_type: Optional[int],
                    sequence: Optional[int], hex_string: str,
@@ -495,7 +869,7 @@ class SerialWorker(threading.Thread):
             tx_count=self._tx_count,
             rx_count=self._rx_count,
             invalid_frame_count=self._invalid_frame_count,
-            port=self._port,
+            connection_label=self._connection.describe(),
             detail=detail,
         ))
 
@@ -515,6 +889,8 @@ class TesterApp:
     self._log_line_count = 0
 
     self._port_var = tk.StringVar(value=default_port)
+    self._baud_var = tk.StringVar(value=str(baud_rate))
+    self._connection_hint_var = tk.StringVar()
     self._servo_var = tk.DoubleVar(value=NEUTRAL_SERVO_ANGLE)
     self._servo_entry_var = tk.StringVar(value=f"{NEUTRAL_SERVO_ANGLE:.1f}")
     self._vibration_var = tk.BooleanVar(value=False)
@@ -547,19 +923,24 @@ class TesterApp:
     if self._worker is not None and self._worker.is_alive():
       return
 
-    port = self._port_var.get().strip()
-    if not port:
-      messagebox.showerror("Missing Port",
-                           "Enter a serial port before connecting.")
+    try:
+      connection = build_connection_config(self._port_var.get())
+      connection = resolve_connection_config(connection)
+      baud_rate = parse_baud_rate(self._baud_var.get())
+    except ValueError as exc:
+      messagebox.showerror("Connection Error", str(exc))
       return
 
     self._apply_command_to_widgets(NEUTRAL_SERVO_ANGLE, False)
     self._last_status = None
-    self._worker = SerialWorker(port, self._baud_rate, self._keepalive_ms,
+    self._worker = SerialWorker(connection, baud_rate, self._keepalive_ms,
                                 self._event_queue)
     self._worker.start()
+    connection_text = f"connecting to {connection.describe()}"
+    if not isinstance(connection, BluetoothConnectionConfig):
+      connection_text = f"{connection_text} at {baud_rate} baud"
     self._append_log_line("SYSTEM", "--", "--", "",
-                          f"connecting to {port} at {self._baud_rate} baud")
+                          connection_text)
     self._set_connection_controls(is_connected=True)
 
   def disconnect(self) -> None:
@@ -578,8 +959,8 @@ class TesterApp:
     self._apply_command_to_widgets(NEUTRAL_SERVO_ANGLE, False)
 
   def _build_ui(self) -> None:
-    self._root.title("Arduino UART Tester")
-    self._root.geometry("1100x760")
+    self._root.title("Arduino UART / Bluetooth Tester")
+    self._root.geometry("1180x780")
 
     container = ttk.Frame(self._root, padding=12)
     container.grid(row=0, column=0, sticky="nsew")
@@ -592,24 +973,45 @@ class TesterApp:
     top_bar = ttk.Frame(container)
     top_bar.grid(row=0, column=0, columnspan=2, sticky="ew", pady=(0, 12))
     top_bar.columnconfigure(1, weight=1)
+    top_bar.columnconfigure(3, weight=1)
 
-    ttk.Label(top_bar, text="Serial Port").grid(row=0, column=0, padx=(0, 8))
-    self._port_combo = ttk.Combobox(top_bar,
-                                    textvariable=self._port_var,
-                                    state="normal")
-    self._port_combo.grid(row=0, column=1, sticky="ew", padx=(0, 8))
-    ttk.Button(top_bar, text="Refresh",
-               command=self.refresh_ports).grid(row=0, column=2, padx=(0, 8))
+    ttk.Label(top_bar, text="Port").grid(row=0, column=0, padx=(0, 8))
+    self._port_combo = ttk.Combobox(
+        top_bar,
+        textvariable=self._port_var,
+        state="normal",
+    )
+    self._port_combo.grid(row=0, column=1, sticky="ew", padx=(0, 12))
+    self._refresh_button = ttk.Button(top_bar,
+                                      text="Refresh",
+                                      command=self.refresh_ports)
+    self._refresh_button.grid(row=0, column=2, sticky="w")
+    ttk.Label(top_bar, text="Baud").grid(row=0, column=3, padx=(12, 8))
+    baud_values = [str(baud_rate) for baud_rate in COMMON_BAUD_RATES]
+    if self._baud_var.get() not in baud_values:
+      baud_values.append(self._baud_var.get())
+    self._baud_combo = ttk.Combobox(
+        top_bar,
+        textvariable=self._baud_var,
+        values=baud_values,
+        state="normal",
+        width=10,
+    )
+    self._baud_combo.grid(row=0, column=4, sticky="w")
     self._connect_button = ttk.Button(top_bar,
                                       text="Connect",
                                       command=self.connect)
-    self._connect_button.grid(row=0, column=3, padx=(0, 8))
+    self._connect_button.grid(row=0, column=5, sticky="w", padx=(12, 0))
     self._disconnect_button = ttk.Button(top_bar,
                                          text="Disconnect",
                                          command=self.disconnect)
-    self._disconnect_button.grid(row=0, column=4, padx=(0, 8))
+    self._disconnect_button.grid(row=0, column=6, sticky="w", padx=(12, 0))
     ttk.Label(top_bar,
-              text=f"Baud: {self._baud_rate}").grid(row=0, column=5, sticky="e")
+              textvariable=self._connection_hint_var).grid(row=1,
+                                                           column=0,
+                                                           columnspan=7,
+                                                           sticky="w",
+                                                           pady=(8, 0))
 
     command_frame = ttk.LabelFrame(container, text="Command")
     command_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
@@ -704,11 +1106,12 @@ class TesterApp:
     status_bar.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(8, 0))
 
   def _enumerate_ports(self) -> list[str]:
-    if list_ports is None:
-      return []
-
-    ports = sorted(list_ports.comports(), key=lambda port_info: port_info.device)
-    return [port_info.device for port_info in ports]
+    discovered_ports: list[str] = []
+    if list_ports is not None:
+      ports = sorted(list_ports.comports(), key=lambda port_info: port_info.device)
+      discovered_ports.extend(port_info.device for port_info in ports)
+    discovered_ports.extend(list_bluetooth_device_options())
+    return list(dict.fromkeys(discovered_ports))
 
   def _schedule_poll(self) -> None:
     self._root.after(self.POLL_INTERVAL_MS, self._poll_worker_events)
@@ -756,14 +1159,14 @@ class TesterApp:
     message_type = ProtocolCodec.format_message_type(event.message_type)
     self._append_log_line(direction_label, message_type, sequence,
                           event.hex_string, event.status)
-    if event.direction == "rx" and event.status == "ok":
+    if event.direction.startswith("rx") and event.status == "ok":
       self._last_rx_var.set(self._format_timestamp(event.timestamp))
 
   def _handle_worker_status(self, status: WorkerStatus) -> None:
     self._last_status = status
     connection_state = f"{'Connected' if status.connected else 'Disconnected'}"
     keepalive_state = "On" if status.keepalive_active else "Off"
-    port_label = status.port if status.port else "--"
+    port_label = status.connection_label if status.connection_label else "--"
     self._status_bar_var.set(
         f"{connection_state} ({port_label}) | Keepalive: {keepalive_state} | "
         f"TX: {status.tx_count} | RX: {status.rx_count} | "
@@ -789,6 +1192,13 @@ class TesterApp:
   def _set_connection_controls(self, is_connected: bool) -> None:
     self._connect_button.configure(state=tk.DISABLED if is_connected else tk.NORMAL)
     self._disconnect_button.configure(state=tk.NORMAL if is_connected else tk.DISABLED)
+    self._refresh_button.configure(state=tk.DISABLED if is_connected else tk.NORMAL)
+    self._port_combo.configure(state=tk.DISABLED if is_connected else tk.NORMAL)
+    self._baud_combo.configure(state=tk.DISABLED if is_connected else tk.NORMAL)
+    self._connection_hint_var.set(
+        ("Use one link for both commands and telemetry. "
+         "Choose a serial port, `/dev/rfcommN`, or a Bluetooth device like "
+         "`HC-05 [AA:BB:CC:DD:EE:FF]`."))
 
   def _apply_command_to_widgets(self, servo_angle: float,
                                 vibration_enabled: bool) -> None:
@@ -860,7 +1270,8 @@ class TesterApp:
 
 
 def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
-  parser = argparse.ArgumentParser(description="Tkinter UART tester for the Arduino firmware protocol.")
+  parser = argparse.ArgumentParser(
+      description="Tkinter UART/Bluetooth tester for the Arduino firmware protocol.")
   parser.add_argument("--port",
                       default="",
                       help="Serial port to prefill in the GUI.")
@@ -882,9 +1293,6 @@ def parse_args(argv: Optional[Iterable[str]] = None) -> argparse.Namespace:
 
 def main(argv: Optional[Iterable[str]] = None) -> int:
   args = parse_args(argv)
-  if SERIAL_IMPORT_ERROR is not None:
-    raise SystemExit(f"pyserial is required to run this tool: {SERIAL_IMPORT_ERROR}")
-
   root = tk.Tk()
   TesterApp(
       root=root,

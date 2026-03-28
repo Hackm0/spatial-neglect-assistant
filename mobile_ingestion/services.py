@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from mobile_ingestion.analyzer import AnalyzerPort, NoOpAnalyzer
+from mobile_ingestion.arduino import ArduinoControllerPort, PySerialArduinoController
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.runtime import AsyncioRunner
 from mobile_ingestion.session_manager import SessionManager
@@ -14,8 +15,10 @@ class ServiceContainer:
   runtime: AsyncioRunner
   analyzer: AnalyzerPort
   session_manager: SessionManager
+  arduino_controller: ArduinoControllerPort
 
   def shutdown(self) -> None:
+    self.arduino_controller.shutdown()
     self.session_manager.shutdown()
 
 
@@ -29,6 +32,7 @@ def build_services(settings: AppConfig) -> ServiceContainer:
 
   runtime = AsyncioRunner()
   analyzer = NoOpAnalyzer()
+  arduino_controller = PySerialArduinoController()
   session_manager = SessionManager(
       runtime=runtime,
       analyzer=analyzer,
@@ -41,4 +45,5 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       runtime=runtime,
       analyzer=analyzer,
       session_manager=session_manager,
+      arduino_controller=arduino_controller,
   )

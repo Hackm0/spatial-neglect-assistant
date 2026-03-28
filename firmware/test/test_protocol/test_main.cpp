@@ -1,9 +1,13 @@
 #include <unity.h>
 
+#include <algorithm>
+#include <limits>
 #include <vector>
 
 #include "ActuatorCommandSupervisor.h"
+#include "ExclusiveTransportLock.h"
 #include "IByteStream.h"
+#include "MirroredByteStream.h"
 #include "ProtocolTypes.h"
 #include "UartFrameCodec.h"
 #include "UartProtocolEndpoint.h"
@@ -14,6 +18,7 @@ class FakeByteStream : public IByteStream {
  public:
   void begin(const unsigned long baudRate) override {
     began = true;
+    ++beginCallCount;
     lastBaudRate = baudRate;
   }
 
@@ -30,11 +35,13 @@ class FakeByteStream : public IByteStream {
   }
 
   size_t write(const uint8_t* data, const size_t length) override {
-    for (size_t index = 0U; index < length; ++index) {
+    ++writeCallCount;
+    const size_t writableLength = std::min(length, maxWriteLength);
+    for (size_t index = 0U; index < writableLength; ++index) {
       writtenBytes.push_back(data[index]);
     }
 
-    return length;
+    return writableLength;
   }
 
   void pushBytes(const uint8_t* data, const size_t length) {
@@ -52,11 +59,23 @@ class FakeByteStream : public IByteStream {
   }
 
   bool began = false;
+  size_t beginCallCount = 0U;
   unsigned long lastBaudRate = 0UL;
+  size_t maxWriteLength = std::numeric_limits<size_t>::max();
+  size_t writeCallCount = 0U;
   std::vector<uint8_t> readBuffer;
   std::vector<uint8_t> writtenBytes;
   size_t readIndex = 0U;
 };
+
+void assertBytesEqual(const std::vector<uint8_t>& expected,
+                      const std::vector<uint8_t>& actual) {
+  TEST_ASSERT_EQUAL_UINT32(static_cast<uint32_t>(expected.size()),
+                           static_cast<uint32_t>(actual.size()));
+  if (!expected.empty()) {
+    TEST_ASSERT_EQUAL_UINT8_ARRAY(expected.data(), actual.data(), expected.size());
+  }
+}
 
 std::vector<uint8_t> makeCommandFrame(const float servoAngleDegrees,
                                       const bool vibrationEnabled) {
@@ -117,6 +136,86 @@ void test_encode_telemetry_snapshot_payload() {
   TEST_ASSERT_EQUAL_HEX8(0x00, payload[3]);
   TEST_ASSERT_EQUAL_HEX8(0x01, payload[12]);
   TEST_ASSERT_EQUAL_HEX8(0x05, payload[13]);
+}
+
+void test_mirrored_stream_begin_initializes_both_streams() {
+  FakeByteStream primaryStream;
+  FakeByteStream secondaryStream;
+  MirroredByteStream mirroredStream(primaryStream, secondaryStream);
+
+  mirroredStream.begin(115200UL);
+
+  TEST_ASSERT_TRUE(primaryStream.began);
+  TEST_ASSERT_TRUE(secondaryStream.began);
+  TEST_ASSERT_EQUAL_UINT32(1U, static_cast<uint32_t>(primaryStream.beginCallCount));
+  TEST_ASSERT_EQUAL_UINT32(1U,
+                           static_cast<uint32_t>(secondaryStream.beginCallCount));
+  TEST_ASSERT_EQUAL_UINT32(115200UL, primaryStream.lastBaudRate);
+  TEST_ASSERT_EQUAL_UINT32(115200UL, secondaryStream.lastBaudRate);
+}
+
+void test_mirrored_stream_reads_only_from_primary() {
+  FakeByteStream primaryStream;
+  FakeByteStream secondaryStream;
+  MirroredByteStream mirroredStream(primaryStream, secondaryStream);
+
+  const uint8_t primaryBytes[] = {0x11U, 0x22U};
+  const uint8_t secondaryBytes[] = {0x33U};
+  primaryStream.pushBytes(primaryBytes, sizeof(primaryBytes));
+  secondaryStream.pushBytes(secondaryBytes, sizeof(secondaryBytes));
+
+  TEST_ASSERT_EQUAL_INT(2, mirroredStream.available());
+  TEST_ASSERT_EQUAL_HEX8(0x11U, static_cast<uint8_t>(mirroredStream.read()));
+  TEST_ASSERT_EQUAL_INT(1, mirroredStream.available());
+  TEST_ASSERT_EQUAL_HEX8(0x22U, static_cast<uint8_t>(mirroredStream.read()));
+  TEST_ASSERT_EQUAL_INT(0, mirroredStream.available());
+  TEST_ASSERT_EQUAL_UINT32(0U, static_cast<uint32_t>(secondaryStream.readIndex));
+  TEST_ASSERT_EQUAL_INT(1, secondaryStream.available());
+}
+
+void test_mirrored_stream_writes_to_both_streams() {
+  FakeByteStream primaryStream;
+  FakeByteStream secondaryStream;
+  MirroredByteStream mirroredStream(primaryStream, secondaryStream);
+
+  const uint8_t payload[] = {0x01U, 0x02U, 0x03U, 0x04U};
+  const size_t bytesWritten = mirroredStream.write(payload, sizeof(payload));
+
+  TEST_ASSERT_EQUAL_UINT32(sizeof(payload), static_cast<uint32_t>(bytesWritten));
+  assertBytesEqual(std::vector<uint8_t>(payload, payload + sizeof(payload)),
+                   primaryStream.writtenBytes);
+  assertBytesEqual(primaryStream.writtenBytes, secondaryStream.writtenBytes);
+}
+
+void test_mirrored_stream_secondary_write_failure_does_not_block_primary() {
+  FakeByteStream primaryStream;
+  FakeByteStream secondaryStream;
+  secondaryStream.maxWriteLength = 0U;
+  MirroredByteStream mirroredStream(primaryStream, secondaryStream);
+
+  const uint8_t payload[] = {0x0AU, 0x0BU, 0x0CU};
+  const size_t bytesWritten = mirroredStream.write(payload, sizeof(payload));
+
+  TEST_ASSERT_EQUAL_UINT32(sizeof(payload), static_cast<uint32_t>(bytesWritten));
+  assertBytesEqual(std::vector<uint8_t>(payload, payload + sizeof(payload)),
+                   primaryStream.writtenBytes);
+  TEST_ASSERT_TRUE(secondaryStream.writtenBytes.empty());
+  TEST_ASSERT_EQUAL_UINT32(1U, static_cast<uint32_t>(secondaryStream.writeCallCount));
+}
+
+void test_mirrored_stream_primary_write_failure_still_allows_secondary_mirror() {
+  FakeByteStream primaryStream;
+  FakeByteStream secondaryStream;
+  primaryStream.maxWriteLength = 0U;
+  MirroredByteStream mirroredStream(primaryStream, secondaryStream);
+
+  const uint8_t payload[] = {0xAAU, 0xBBU, 0xCCU};
+  const size_t bytesWritten = mirroredStream.write(payload, sizeof(payload));
+
+  TEST_ASSERT_EQUAL_UINT32(sizeof(payload), static_cast<uint32_t>(bytesWritten));
+  TEST_ASSERT_TRUE(primaryStream.writtenBytes.empty());
+  assertBytesEqual(std::vector<uint8_t>(payload, payload + sizeof(payload)),
+                   secondaryStream.writtenBytes);
 }
 
 void test_bad_crc_rejected() {
@@ -189,6 +288,32 @@ void test_partial_frame_parsing() {
   TEST_ASSERT_TRUE(command.vibrationEnabled);
 }
 
+void test_endpoint_with_mirrored_stream_uses_primary_for_commands_and_mirrors_telemetry() {
+  FakeByteStream primaryStream;
+  FakeByteStream secondaryStream;
+  MirroredByteStream mirroredStream(primaryStream, secondaryStream);
+  UartProtocolEndpoint endpoint(mirroredStream);
+  endpoint.begin(115200UL);
+
+  secondaryStream.pushBytes(makeCommandFrame(15.0F, true));
+  endpoint.processIncoming();
+
+  ActuatorCommand command;
+  TEST_ASSERT_FALSE(endpoint.tryConsumeLatestCommand(command));
+
+  primaryStream.pushBytes(makeCommandFrame(75.0F, false));
+  endpoint.processIncoming();
+
+  TEST_ASSERT_TRUE(endpoint.tryConsumeLatestCommand(command));
+  TEST_ASSERT_FLOAT_WITHIN(0.05F, 75.0F, command.servoAngleDegrees);
+  TEST_ASSERT_FALSE(command.vibrationEnabled);
+
+  const SensorSnapshot snapshot = {100U, true, false, 10, 20,
+                                   30,   true, 100,  -100, true};
+  TEST_ASSERT_TRUE(endpoint.sendTelemetrySnapshot(snapshot));
+  assertBytesEqual(primaryStream.writtenBytes, secondaryStream.writtenBytes);
+}
+
 void test_command_timeout_returns_failsafe_output() {
   ActuatorCommandSupervisor supervisor(90.0F, 250UL);
   TEST_ASSERT_TRUE(supervisor.isFailsafeActive(0UL));
@@ -205,6 +330,45 @@ void test_command_timeout_returns_failsafe_output() {
   TEST_ASSERT_TRUE(supervisor.isFailsafeActive(260UL));
   TEST_ASSERT_FLOAT_WITHIN(0.05F, 90.0F, current.servoAngleDegrees);
   TEST_ASSERT_FALSE(current.vibrationEnabled);
+}
+
+void test_exclusive_transport_lock_accepts_first_transport_and_refreshes_it() {
+  ExclusiveTransportLock transportLock(250UL);
+
+  TEST_ASSERT_FALSE(transportLock.hasActiveTransport());
+  TEST_ASSERT_TRUE(
+      transportLock.tryLockTo(TransportChannel::kPrimary, 10UL));
+  TEST_ASSERT_TRUE(transportLock.hasActiveTransport());
+  TEST_ASSERT_TRUE(
+      transportLock.isActiveTransport(TransportChannel::kPrimary));
+  TEST_ASSERT_FALSE(
+      transportLock.isActiveTransport(TransportChannel::kSecondary));
+
+  TEST_ASSERT_TRUE(
+      transportLock.tryLockTo(TransportChannel::kPrimary, 100UL));
+  transportLock.clearExpired(349UL);
+  TEST_ASSERT_TRUE(transportLock.hasActiveTransport());
+
+  transportLock.clearExpired(350UL);
+  TEST_ASSERT_FALSE(transportLock.hasActiveTransport());
+}
+
+void test_exclusive_transport_lock_rejects_other_transport_until_timeout() {
+  ExclusiveTransportLock transportLock(250UL);
+
+  TEST_ASSERT_TRUE(
+      transportLock.tryLockTo(TransportChannel::kPrimary, 20UL));
+  TEST_ASSERT_FALSE(
+      transportLock.tryLockTo(TransportChannel::kSecondary, 100UL));
+  TEST_ASSERT_TRUE(
+      transportLock.isActiveTransport(TransportChannel::kPrimary));
+
+  transportLock.clearExpired(270UL);
+  TEST_ASSERT_FALSE(transportLock.hasActiveTransport());
+  TEST_ASSERT_TRUE(
+      transportLock.tryLockTo(TransportChannel::kSecondary, 271UL));
+  TEST_ASSERT_TRUE(
+      transportLock.isActiveTransport(TransportChannel::kSecondary));
 }
 
 void test_send_telemetry_snapshot_writes_frame() {
@@ -237,11 +401,22 @@ int main(int argc, char** argv) {
   UNITY_BEGIN();
   RUN_TEST(test_encode_and_decode_actuator_command_payload);
   RUN_TEST(test_encode_telemetry_snapshot_payload);
+  RUN_TEST(test_mirrored_stream_begin_initializes_both_streams);
+  RUN_TEST(test_mirrored_stream_reads_only_from_primary);
+  RUN_TEST(test_mirrored_stream_writes_to_both_streams);
+  RUN_TEST(test_mirrored_stream_secondary_write_failure_does_not_block_primary);
+  RUN_TEST(test_mirrored_stream_primary_write_failure_still_allows_secondary_mirror);
   RUN_TEST(test_bad_crc_rejected);
   RUN_TEST(test_oversized_payload_rejected);
   RUN_TEST(test_resync_after_garbage_bytes);
   RUN_TEST(test_partial_frame_parsing);
+  RUN_TEST(
+      test_endpoint_with_mirrored_stream_uses_primary_for_commands_and_mirrors_telemetry);
   RUN_TEST(test_command_timeout_returns_failsafe_output);
+  RUN_TEST(
+      test_exclusive_transport_lock_accepts_first_transport_and_refreshes_it);
+  RUN_TEST(
+      test_exclusive_transport_lock_rejects_other_transport_until_timeout);
   RUN_TEST(test_send_telemetry_snapshot_writes_frame);
   return UNITY_END();
 }

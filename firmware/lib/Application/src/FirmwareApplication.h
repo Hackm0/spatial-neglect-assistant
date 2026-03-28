@@ -5,8 +5,9 @@
 
 #include <ActuatorCommandSupervisor.h>
 #include <AnalogJoystick.h>
-#include <HardwareSerialByteStream.h>
+#include <ExclusiveTransportLock.h>
 #include <HcSr04DistanceSensor.h>
+#include <IByteStream.h>
 #include <MillisInterval.h>
 #include <Mpu9250Accelerometer.h>
 #include <ProtocolTypes.h>
@@ -27,11 +28,14 @@ struct FirmwareApplicationConfig {
 class FirmwareApplication {
  public:
   FirmwareApplication(const FirmwareApplicationConfig& config,
-                      HardwareSerial& serial = Serial,
+                      IByteStream& primaryTransport,
+                      IByteStream* secondaryTransport = nullptr,
                       TwoWire& wire = Wire);
 
   bool begin();
   void update(unsigned long nowMs);
+  bool isSecondaryTransportActive() const;
+  void resetSecondaryTransportReception();
 
  private:
   void applyActuatorCommand(const ActuatorCommand& command);
@@ -41,8 +45,9 @@ class FirmwareApplication {
   void updateAccelerometerInitialization(unsigned long nowMs);
 
   const FirmwareApplicationConfig config_;
-  HardwareSerialByteStream serialTransport_;
-  UartProtocolEndpoint protocolEndpoint_;
+  IByteStream* secondaryTransport_;
+  UartProtocolEndpoint primaryProtocolEndpoint_;
+  UartProtocolEndpoint secondaryProtocolEndpoint_;
   Mpu9250Accelerometer accelerometer_;
   AnalogJoystick joystick_;
   HcSr04DistanceSensor distanceSensor_;
@@ -50,7 +55,9 @@ class FirmwareApplication {
   VibrationMotorController vibrationMotor_;
   MillisInterval sensorSampleInterval_;
   MillisInterval telemetryInterval_;
+  MillisInterval secondaryTelemetryInterval_;
   MillisInterval accelerometerRetryInterval_;
+  ExclusiveTransportLock transportLock_;
   ActuatorCommandSupervisor commandSupervisor_;
   SensorSnapshot latestSnapshot_;
 };

@@ -2,6 +2,8 @@
 
 #include <limits.h>
 
+#include <NullByteStream.h>
+
 namespace {
 
 constexpr float kMinimumNormalizedInput = -1.0F;
@@ -63,10 +65,15 @@ uint16_t distanceCmToMm(const float distanceCm) {
 }  // namespace
 
 FirmwareApplication::FirmwareApplication(const FirmwareApplicationConfig& config,
-                                         HardwareSerial& serial, TwoWire& wire)
+                                         IByteStream& primaryTransport,
+                                         IByteStream* secondaryTransport,
+                                         TwoWire& wire)
     : config_(config),
-      serialTransport_(serial),
-      protocolEndpoint_(serialTransport_),
+      secondaryTransport_(secondaryTransport),
+      primaryProtocolEndpoint_(primaryTransport),
+      secondaryProtocolEndpoint_(secondaryTransport == nullptr
+                                     ? NullByteStream::instance()
+                                     : *secondaryTransport),
       accelerometer_(wire),
       joystick_(config_.joystickConfig),
       distanceSensor_(config_.distanceSensorConfig),
@@ -74,7 +81,10 @@ FirmwareApplication::FirmwareApplication(const FirmwareApplicationConfig& config
       vibrationMotor_(config_.vibrationMotorConfig),
       sensorSampleInterval_(config_.sensorSampleIntervalMs),
       telemetryInterval_(config_.protocolConfig.telemetryIntervalMs),
+      secondaryTelemetryInterval_(
+          config_.protocolConfig.secondaryTelemetryIntervalMs),
       accelerometerRetryInterval_(config_.accelerometerRetryIntervalMs),
+      transportLock_(config_.protocolConfig.commandTimeoutMs),
       commandSupervisor_(config_.servoConfig.initialAngle,
                          config_.protocolConfig.commandTimeoutMs),
       latestSnapshot_() {}
@@ -82,9 +92,14 @@ FirmwareApplication::FirmwareApplication(const FirmwareApplicationConfig& config
 bool FirmwareApplication::begin() {
   const unsigned long nowMs = millis();
 
-  protocolEndpoint_.begin(config_.protocolConfig.baudRate);
+  primaryProtocolEndpoint_.begin(config_.protocolConfig.primaryBaudRate);
+  if (secondaryTransport_ != nullptr) {
+    secondaryProtocolEndpoint_.begin(config_.protocolConfig.secondaryBaudRate);
+  }
+  transportLock_.clear();
   sensorSampleInterval_.reset(nowMs);
   telemetryInterval_.reset(nowMs);
+  secondaryTelemetryInterval_.reset(nowMs);
   accelerometerRetryInterval_.reset(nowMs);
 
   joystick_.begin();
@@ -102,10 +117,21 @@ bool FirmwareApplication::begin() {
 }
 
 void FirmwareApplication::update(const unsigned long nowMs) {
-  protocolEndpoint_.processIncoming();
+  transportLock_.clearExpired(nowMs);
+
+  primaryProtocolEndpoint_.processIncoming();
+  if (secondaryTransport_ != nullptr) {
+    secondaryProtocolEndpoint_.processIncoming();
+  }
 
   ActuatorCommand receivedCommand;
-  if (protocolEndpoint_.tryConsumeLatestCommand(receivedCommand)) {
+  if (primaryProtocolEndpoint_.tryConsumeLatestCommand(receivedCommand) &&
+      transportLock_.tryLockTo(TransportChannel::kPrimary, nowMs)) {
+    commandSupervisor_.acceptCommand(receivedCommand, nowMs);
+  }
+  if (secondaryTransport_ != nullptr &&
+      secondaryProtocolEndpoint_.tryConsumeLatestCommand(receivedCommand) &&
+      transportLock_.tryLockTo(TransportChannel::kSecondary, nowMs)) {
     commandSupervisor_.acceptCommand(receivedCommand, nowMs);
   }
 
@@ -122,10 +148,33 @@ void FirmwareApplication::update(const unsigned long nowMs) {
     refreshSensors();
   }
 
-  if (telemetryInterval_.isReady(nowMs)) {
+  if (transportLock_.isActiveTransport(TransportChannel::kPrimary) &&
+      telemetryInterval_.isReady(nowMs)) {
     captureDistanceState();
-    static_cast<void>(protocolEndpoint_.sendTelemetrySnapshot(latestSnapshot_));
+    static_cast<void>(
+        primaryProtocolEndpoint_.sendTelemetrySnapshot(latestSnapshot_));
   }
+
+  if (secondaryTransport_ != nullptr &&
+      transportLock_.isActiveTransport(TransportChannel::kSecondary) &&
+      secondaryTelemetryInterval_.isReady(nowMs)) {
+    captureDistanceState();
+    static_cast<void>(
+        secondaryProtocolEndpoint_.sendTelemetrySnapshot(latestSnapshot_));
+  }
+}
+
+bool FirmwareApplication::isSecondaryTransportActive() const {
+  return secondaryTransport_ != nullptr &&
+         transportLock_.isActiveTransport(TransportChannel::kSecondary);
+}
+
+void FirmwareApplication::resetSecondaryTransportReception() {
+  if (secondaryTransport_ == nullptr) {
+    return;
+  }
+
+  secondaryProtocolEndpoint_.resetReception();
 }
 
 void FirmwareApplication::applyActuatorCommand(const ActuatorCommand& command) {

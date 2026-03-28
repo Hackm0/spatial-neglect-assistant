@@ -32,6 +32,158 @@
         </div>
 
         <p id="error-message" class="error-message" hidden></p>
+
+        <div class="debug-toggle-row">
+          <button id="debug-toggle-button" type="button" class="ghost-button">
+            Activer le debug Arduino
+          </button>
+        </div>
+
+        <section id="arduino-debug-panel" class="debug-panel" hidden>
+          <div class="debug-header">
+            <div>
+              <h2>Debug Arduino</h2>
+              <p class="debug-description">
+                Ouvre le monitoring série côté serveur et permet le contrôle manuel
+                quand le mode debug est actif.
+              </p>
+            </div>
+            <span id="arduino-debug-badge" class="status-badge subtle">Inactif</span>
+          </div>
+
+          <p id="arduino-error-message" class="error-message" hidden></p>
+
+          <div class="debug-grid">
+            <section class="debug-block">
+              <h3>Connexion série</h3>
+              <div class="inline-controls">
+                <select id="arduino-port-select" class="debug-select"></select>
+                <button id="arduino-refresh-ports-button" type="button" class="secondary">
+                  Actualiser
+                </button>
+              </div>
+              <div class="inline-controls">
+                <button id="arduino-connect-button" type="button">Connecter Arduino</button>
+                <button id="arduino-disconnect-button" type="button" class="secondary" disabled>
+                  Déconnecter Arduino
+                </button>
+              </div>
+              <dl class="debug-stats">
+                <div>
+                  <dt>Disponibilité</dt>
+                  <dd id="arduino-availability-detail">--</dd>
+                </div>
+                <div>
+                  <dt>Port</dt>
+                  <dd id="arduino-selected-port">--</dd>
+                </div>
+                <div>
+                  <dt>Keepalive</dt>
+                  <dd id="arduino-keepalive-status">Off</dd>
+                </div>
+                <div>
+                  <dt>Détail</dt>
+                  <dd id="arduino-connection-detail">--</dd>
+                </div>
+                <div>
+                  <dt>TX</dt>
+                  <dd id="arduino-tx-count">0</dd>
+                </div>
+                <div>
+                  <dt>RX</dt>
+                  <dd id="arduino-rx-count">0</dd>
+                </div>
+                <div>
+                  <dt>Frames invalides</dt>
+                  <dd id="arduino-invalid-count">0</dd>
+                </div>
+                <div>
+                  <dt>Dernier RX</dt>
+                  <dd id="arduino-last-rx">--</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section class="debug-block">
+              <h3>Télémétrie</h3>
+              <dl class="telemetry-grid">
+                <div>
+                  <dt>Distance</dt>
+                  <dd id="arduino-distance">--</dd>
+                </div>
+                <div>
+                  <dt>Flags distance</dt>
+                  <dd id="arduino-distance-flags">--</dd>
+                </div>
+                <div>
+                  <dt>Accel X</dt>
+                  <dd id="arduino-accel-x">--</dd>
+                </div>
+                <div>
+                  <dt>Accel Y</dt>
+                  <dd id="arduino-accel-y">--</dd>
+                </div>
+                <div>
+                  <dt>Accel Z</dt>
+                  <dd id="arduino-accel-z">--</dd>
+                </div>
+                <div>
+                  <dt>Joystick X</dt>
+                  <dd id="arduino-joystick-x">--</dd>
+                </div>
+                <div>
+                  <dt>Joystick Y</dt>
+                  <dd id="arduino-joystick-y">--</dd>
+                </div>
+                <div>
+                  <dt>Bouton</dt>
+                  <dd id="arduino-joystick-button">--</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section class="debug-block debug-block-wide">
+              <h3>Contrôle manuel</h3>
+              <label class="servo-label" for="arduino-servo-range">Servo (deg)</label>
+              <input
+                id="arduino-servo-range"
+                type="range"
+                min="0"
+                max="180"
+                step="0.1"
+                value="90"
+              >
+              <div class="inline-controls">
+                <input
+                  id="arduino-servo-number"
+                  type="number"
+                  min="0"
+                  max="180"
+                  step="0.1"
+                  value="90"
+                  class="debug-number"
+                >
+                <label class="checkbox-row" for="arduino-vibration-toggle">
+                  <input id="arduino-vibration-toggle" type="checkbox">
+                  Vibration activée
+                </label>
+              </div>
+              <div class="inline-controls">
+                <button id="arduino-center-button" type="button" class="secondary">
+                  Centrer
+                </button>
+                <button id="arduino-all-stop-button" type="button" class="secondary">
+                  All stop
+                </button>
+              </div>
+            </section>
+
+            <section class="debug-block debug-block-wide">
+              <h3>Log protocole</h3>
+              <pre id="arduino-protocol-log" class="protocol-log"></pre>
+            </section>
+          </div>
+        </section>
       </section>
     </main>
 

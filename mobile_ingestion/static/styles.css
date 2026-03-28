@@ -33,7 +33,7 @@ body {
 }
 
 .card {
-  width: min(100%, 540px);
+  width: min(100%, 960px);
   padding: 28px;
   border-radius: 28px;
   background: var(--surface);
@@ -100,6 +100,10 @@ h1 {
   margin-top: 20px;
 }
 
+.debug-toggle-row {
+  margin-top: 16px;
+}
+
 button {
   flex: 1;
   min-height: 48px;
@@ -115,6 +119,13 @@ button.secondary {
   background: linear-gradient(135deg, #64748b 0%, #334155 100%);
 }
 
+.ghost-button {
+  width: 100%;
+  color: var(--accent-strong);
+  background: rgba(15, 118, 110, 0.08);
+  border: 1px solid rgba(15, 118, 110, 0.16);
+}
+
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
@@ -127,6 +138,140 @@ button:disabled {
   line-height: 1.45;
 }
 
+.debug-panel {
+  margin-top: 20px;
+  padding-top: 20px;
+  border-top: 1px solid rgba(15, 118, 110, 0.12);
+}
+
+.debug-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.debug-description {
+  margin: 8px 0 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.status-badge.subtle {
+  background: rgba(100, 116, 139, 0.12);
+  color: #334155;
+}
+
+.debug-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.debug-block {
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.74);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+.debug-block h3 {
+  margin: 0 0 14px;
+  font-size: 1rem;
+}
+
+.debug-block-wide {
+  grid-column: 1 / -1;
+}
+
+.inline-controls {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.debug-select,
+.debug-number {
+  width: 100%;
+  min-height: 46px;
+  padding: 0 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(17, 24, 39, 0.12);
+  background: white;
+  color: var(--text);
+  font: inherit;
+}
+
+.debug-stats,
+.telemetry-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+}
+
+.debug-stats div,
+.telemetry-grid div {
+  margin: 0;
+  padding: 12px;
+  border-radius: 16px;
+  background: rgba(15, 118, 110, 0.06);
+}
+
+.debug-stats dt,
+.telemetry-grid dt {
+  margin-bottom: 6px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.debug-stats dd,
+.telemetry-grid dd {
+  margin: 0;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.servo-label {
+  display: block;
+  margin-bottom: 10px;
+  font-weight: 700;
+}
+
+input[type="range"] {
+  width: 100%;
+  margin-bottom: 12px;
+}
+
+.checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 46px;
+  padding: 0 12px;
+  border-radius: 14px;
+  background: rgba(15, 118, 110, 0.06);
+  font-weight: 600;
+}
+
+.protocol-log {
+  margin: 0;
+  min-height: 220px;
+  max-height: 320px;
+  overflow: auto;
+  padding: 14px;
+  border-radius: 16px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.83rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 @media (max-width: 640px) {
   .card {
     padding: 22px;
@@ -135,5 +280,16 @@ button:disabled {
 
   .button-row {
     flex-direction: column;
+  }
+
+  .debug-header,
+  .inline-controls {
+    flex-direction: column;
+  }
+
+  .debug-grid,
+  .debug-stats,
+  .telemetry-grid {
+    grid-template-columns: 1fr;
   }
 }

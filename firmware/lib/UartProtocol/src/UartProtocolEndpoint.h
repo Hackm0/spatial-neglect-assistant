@@ -14,6 +14,7 @@ class UartProtocolEndpoint {
   void processIncoming();
   bool tryConsumeLatestCommand(ActuatorCommand& command);
   bool sendTelemetrySnapshot(const SensorSnapshot& snapshot);
+  void resetReception();
 
   uint32_t invalidFrameCount() const;
 

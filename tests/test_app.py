@@ -1,14 +1,18 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import queue
+from dataclasses import dataclass, replace
 
 import pytest
 
 from mobile_ingestion import create_app
 from mobile_ingestion.analyzer import AnalyzerMetrics, AnalyzerPort, SessionMetadata
+from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoEvent,
+                                      ArduinoSnapshot, ArduinoSubscription)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto
 from mobile_ingestion.services import ServiceContainer
+from uart_protocol import ActuatorCommand
 
 
 class RecordingAnalyzer(AnalyzerPort):
@@ -97,6 +101,102 @@ class FakeSessionManager:
     self.close_active_session()
 
 
+def make_snapshot(**changes: object) -> ArduinoSnapshot:
+  snapshot = ArduinoSnapshot(
+      available=True,
+      connected=False,
+      keepalive_active=False,
+      selected_port=None,
+      baud_rate=115200,
+      tx_count=0,
+      rx_count=0,
+      invalid_frame_count=0,
+      detail="serial ready",
+      debug_enabled=False,
+      backend_command=ActuatorCommand(90.0, False),
+      debug_command=ActuatorCommand(90.0, False),
+      effective_command=ActuatorCommand(90.0, False),
+      latest_telemetry=None,
+      last_rx_timestamp=None,
+      recent_frames=tuple(),
+  )
+  return replace(snapshot, **changes)
+
+
+class FakeArduinoController:
+
+  def __init__(self) -> None:
+    self.snapshot = make_snapshot()
+    self.closed = 0
+    self.port_calls = 0
+    self.last_port: str | None = None
+    self.subscription_events: "queue.Queue[ArduinoEvent | None]" = queue.Queue()
+    self.subscription_events.put(ArduinoEvent("status", self.snapshot))
+    self.subscription_events.put(None)
+
+  def list_ports(self) -> tuple[str, ...]:
+    self.port_calls += 1
+    return ("/dev/ttyUSB0", "/dev/ttyUSB1")
+
+  def connect(self, port: str) -> None:
+    self.last_port = port
+    self.snapshot = replace(
+        self.snapshot,
+        connected=True,
+        keepalive_active=True,
+        selected_port=port,
+        detail=f"connected to {port}",
+    )
+
+  def disconnect(self) -> None:
+    self.closed += 1
+    self.snapshot = replace(
+        self.snapshot,
+        connected=False,
+        keepalive_active=False,
+        detail="disconnected",
+    )
+
+  def shutdown(self) -> None:
+    self.disconnect()
+
+  def get_snapshot(self) -> ArduinoSnapshot:
+    return self.snapshot
+
+  def set_backend_command(self, command: ActuatorCommand) -> None:
+    effective_command = (command if not self.snapshot.debug_enabled
+                         else self.snapshot.debug_command)
+    self.snapshot = replace(
+        self.snapshot,
+        backend_command=command,
+        effective_command=effective_command,
+    )
+
+  def set_debug_enabled(self, enabled: bool) -> None:
+    effective_command = (self.snapshot.debug_command
+                         if enabled else self.snapshot.backend_command)
+    self.snapshot = replace(
+        self.snapshot,
+        debug_enabled=enabled,
+        effective_command=effective_command,
+    )
+
+  def set_debug_command(self, command: ActuatorCommand) -> None:
+    if not self.snapshot.debug_enabled or not self.snapshot.connected:
+      raise ArduinoConflictError("manual control unavailable")
+    self.snapshot = replace(
+        self.snapshot,
+        debug_command=command,
+        effective_command=command,
+    )
+
+  def subscribe(self) -> ArduinoSubscription:
+    return ArduinoSubscription(1, self.subscription_events)
+
+  def unsubscribe(self, subscription: ArduinoSubscription) -> None:
+    del subscription
+
+
 @dataclass(slots=True)
 class FakeRuntime:
 
@@ -112,6 +212,7 @@ def client():
       runtime=FakeRuntime(),
       analyzer=RecordingAnalyzer(),
       session_manager=FakeSessionManager(),
+      arduino_controller=FakeArduinoController(),
   )
   app = create_app(settings, services=services)
   app.config.update(TESTING=True)
@@ -123,7 +224,9 @@ def test_index_renders(client) -> None:
   response = client.get("/")
 
   assert response.status_code == 200
-  assert "Connexion mobile temps réel" in response.get_data(as_text=True)
+  body = response.get_data(as_text=True)
+  assert "Connexion mobile temps réel" in body
+  assert "Debug Arduino" in body
 
 
 def test_status_route_returns_json(client) -> None:
@@ -155,3 +258,44 @@ def test_delete_session_is_idempotent(client) -> None:
 
   assert first_response.status_code == 204
   assert second_response.status_code == 204
+
+
+def test_arduino_status_route_returns_json(client) -> None:
+  response = client.get("/api/arduino/status")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["available"] is True
+  assert payload["connected"] is False
+  assert payload["debugEnabled"] is False
+
+
+def test_arduino_connect_route_returns_status_snapshot(client) -> None:
+  response = client.post("/api/arduino/connection", json={"port": "/dev/ttyUSB0"})
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["connected"] is True
+  assert payload["selectedPort"] == "/dev/ttyUSB0"
+
+
+def test_arduino_debug_command_conflict_returns_409(client) -> None:
+  response = client.put(
+      "/api/arduino/debug/command",
+      json={
+          "servoAngleDegrees": 45.0,
+          "vibrationEnabled": True,
+      },
+  )
+
+  assert response.status_code == 409
+  assert response.get_json()["error"] == "manual control unavailable"
+
+
+def test_arduino_events_route_streams_sse(client) -> None:
+  response = client.get("/api/arduino/events")
+  body = b"".join(response.response)
+
+  assert response.status_code == 200
+  assert b"event: status" in body
+  assert b"debugEnabled" in body
