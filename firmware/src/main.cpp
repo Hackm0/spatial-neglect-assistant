@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <AnalogJoystick.h>
 #include <HcSr04DistanceSensor.h>
 #include <MillisInterval.h>
 #include <Mpu9250Accelerometer.h>
@@ -8,13 +9,16 @@ namespace {
 
 constexpr uint8_t kDistanceTriggerPin = 7U;
 constexpr uint8_t kDistanceEchoPin = 8U;
+constexpr uint8_t kJoystickXPin = A0;
+constexpr uint8_t kJoystickYPin = A1;
+constexpr uint8_t kJoystickButtonPin = 2U;
 constexpr uint8_t kServoPin = 9U;
 constexpr float kServoMinAngle = 0.0F;
 constexpr float kServoMaxAngle = 180.0F;
 constexpr float kServoInitialAngle = 90.0F;
 constexpr float kServoMaxDegreesPerSecond = 90.0F;
-constexpr float kMinControlAccelerationG = -1.0F;
-constexpr float kMaxControlAccelerationG = 1.0F;
+constexpr float kMinControlInput = -1.0F;
+constexpr float kMaxControlInput = 1.0F;
 
 constexpr unsigned long kDistanceMeasurementIntervalMs = 60UL;
 constexpr unsigned long kDistanceEchoTimeoutUs = 30000UL;
@@ -29,6 +33,16 @@ const HcSr04Config kDistanceSensorConfig = {
     kDistanceEchoTimeoutUs,
 };
 
+const AnalogJoystickConfig kJoystickConfig = {
+    kJoystickXPin,
+    kJoystickYPin,
+    kJoystickButtonPin,
+    0.05F,
+    false,
+    false,
+    true,
+};
+
 const ServoMotorConfig kServoConfig = {
     kServoPin,
     kServoMinAngle,
@@ -38,11 +52,14 @@ const ServoMotorConfig kServoConfig = {
 };
 
 Mpu9250Accelerometer accelerometer;
+AnalogJoystick joystick(kJoystickConfig);
 HcSr04DistanceSensor distanceSensor(kDistanceSensorConfig);
 ServoMotorController servoMotor(kServoConfig);
 MillisInterval sensorSampleInterval(kSensorSampleIntervalMs);
 MillisInterval printInterval(kPrintIntervalMs);
 MillisInterval initRetryInterval(kInitRetryIntervalMs);
+float latestAccelerometerX = 0.0F;
+bool accelerometerReadingAvailable = false;
 
 float clampFloat(const float value, const float minimum, const float maximum) {
   if (value < minimum) {
@@ -56,47 +73,46 @@ float clampFloat(const float value, const float minimum, const float maximum) {
   return value;
 }
 
-float mapAccelXToServoAngle(const float accelX) {
-  const float clampedAccelX =
-      clampFloat(accelX, kMinControlAccelerationG, kMaxControlAccelerationG);
-  const float normalizedAccelX =
-      (clampedAccelX - kMinControlAccelerationG) /
-      (kMaxControlAccelerationG - kMinControlAccelerationG);
+float mapControlInputToServoAngle(const float controlInput) {
+  const float clampedControlInput =
+      clampFloat(controlInput, kMinControlInput, kMaxControlInput);
+  const float normalizedControlInput =
+      (clampedControlInput - kMinControlInput) /
+      (kMaxControlInput - kMinControlInput);
   return kServoMinAngle +
-         (normalizedAccelX * (kServoMaxAngle - kServoMinAngle));
+         (normalizedControlInput * (kServoMaxAngle - kServoMinAngle));
 }
 
-void printDistanceValue() {
-  Serial.print(F("Distance: "));
-
-  if (distanceSensor.lastMeasurementTimedOut()) {
-    Serial.println(F("timeout"));
-    return;
+float combineControlInputs(const float joystickX,
+                           const bool hasAccelerometerSample,
+                           const float accelX) {
+  if (!hasAccelerometerSample) {
+    return joystickX;
   }
 
-  if (!distanceSensor.hasReading()) {
-    Serial.println(F("waiting"));
-    return;
-  }
-
-  Serial.print(distanceSensor.distanceCm(), 2);
-  Serial.println(F(" cm"));
+  const float clampedAccelX =
+      clampFloat(accelX, kMinControlInput, kMaxControlInput);
+  return (clampedAccelX + joystickX) * 0.5F;
 }
 
-void printSensorValues() {
-  if (accelerometer.isInitialized()) {
-    Serial.print(F("Accel X: "));
-    Serial.print(accelerometer.getAccelX(), 3);
-    Serial.print(F(" g | Y: "));
-    Serial.print(accelerometer.getAccelY(), 3);
-    Serial.print(F(" g | Z: "));
-    Serial.print(accelerometer.getAccelZ(), 3);
-    Serial.print(F(" g | "));
+void printTelemetry() {
+  Serial.print(F("Joystick X: "));
+  Serial.print(joystick.getX(), 3);
+  Serial.print(F(" | Y: "));
+  Serial.print(joystick.getY(), 3);
+  Serial.print(F(" | Button: "));
+  Serial.print(joystick.isButtonPressed() ? F("pressed") : F("released"));
+  Serial.print(F(" | Accel X: "));
+
+  if (accelerometerReadingAvailable) {
+    Serial.print(latestAccelerometerX, 3);
+    Serial.print(F(" g"));
   } else {
-    Serial.print(F("Accel: unavailable | "));
+    Serial.print(F("unavailable"));
   }
 
-  printDistanceValue();
+  Serial.print(F(" | Servo target: "));
+  Serial.println(servoMotor.targetAngle(), 1);
 }
 
 void resetSensorCadence(const unsigned long nowMs) {
@@ -106,22 +122,30 @@ void resetSensorCadence(const unsigned long nowMs) {
 
 void attemptAccelerometerInitialization(const unsigned long nowMs) {
   if (accelerometer.begin()) {
+    accelerometerReadingAvailable = false;
     resetSensorCadence(nowMs);
     Serial.println(F("MPU-9250 accelerometer initialized."));
     initRetryInterval.reset(nowMs);
     return;
   }
 
+  accelerometerReadingAvailable = false;
   Serial.println(F("MPU-9250 init failed. Retrying..."));
   initRetryInterval.reset(nowMs);
 }
 
-void refreshAccelerometerAndUpdateServoTarget() {
-  if (!accelerometer.refresh()) {
-    return;
+void refreshSensorsAndUpdateServoTarget() {
+  joystick.refresh();
+
+  accelerometerReadingAvailable = false;
+  if (accelerometer.isInitialized() && accelerometer.refresh()) {
+    latestAccelerometerX = accelerometer.getAccelX();
+    accelerometerReadingAvailable = true;
   }
 
-  servoMotor.setTargetAngle(mapAccelXToServoAngle(accelerometer.getAccelX()));
+  const float controlInput = combineControlInputs(
+      joystick.getX(), accelerometerReadingAvailable, latestAccelerometerX);
+  servoMotor.setTargetAngle(mapControlInputToServoAngle(controlInput));
 }
 
 }  // namespace
@@ -133,6 +157,7 @@ void setup() {
   sensorSampleInterval.reset(nowMs);
   printInterval.reset(nowMs);
   initRetryInterval.reset(nowMs);
+  joystick.begin();
   if (!distanceSensor.begin()) {
     Serial.println(F("HC-SR04 initialization failed."));
   }
@@ -152,11 +177,13 @@ void loop() {
     if (initRetryInterval.isReady(nowMs)) {
       attemptAccelerometerInitialization(nowMs);
     }
-  } else if (sensorSampleInterval.isReady(nowMs)) {
-    refreshAccelerometerAndUpdateServoTarget();
+  }
+
+  if (sensorSampleInterval.isReady(nowMs)) {
+    refreshSensorsAndUpdateServoTarget();
   }
 
   if (printInterval.isReady(nowMs)) {
-    printSensorValues();
+    printTelemetry();
   }
 }
