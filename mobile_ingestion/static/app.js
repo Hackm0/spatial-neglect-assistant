@@ -5,11 +5,34 @@ const elements = {
   preview: document.getElementById("local-preview"),
   statusBadge: document.getElementById("status-badge"),
   statusDetail: document.getElementById("status-detail"),
+  voiceStatusBadge: document.getElementById("voice-status-badge"),
+  voiceStatusDetail: document.getElementById("voice-status-detail"),
+  voiceLastCommand: document.getElementById("voice-last-command"),
+  wakePhraseInput: document.getElementById("wake-phrase-input"),
+  voiceIdleTimeoutInput: document.getElementById("voice-idle-timeout-input"),
+  voiceSaveSettingsButton: document.getElementById("voice-save-settings-button"),
+  voiceToggleButton: document.getElementById("voice-toggle-button"),
 };
 
 let localStream = null;
 let peerConnection = null;
 let statusInterval = null;
+let speechRecognition = null;
+let wakeWordListeningEnabled = false;
+let awaitingVoiceCommand = false;
+let commandDeadlineAt = 0;
+let inactivityTimerId = null;
+
+const COMMAND_CAPTURE_WINDOW_MS = 12000;
+const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+const SETTINGS_STORAGE_KEY = "mobileIngestion.voiceSettings.v1";
+const DEFAULT_WAKE_WORDS = Array.isArray(window.APP_CONFIG?.voiceWakePhrases)
+  ? window.APP_CONFIG.voiceWakePhrases
+  : ["ok jarvis", "okay jarvis"];
+const DEFAULT_IDLE_TIMEOUT_SECONDS = Number(window.APP_CONFIG?.voiceIdleTimeoutSeconds || 180);
+
+let activeWakeWords = DEFAULT_WAKE_WORDS;
+let activeIdleTimeoutSeconds = DEFAULT_IDLE_TIMEOUT_SECONDS;
 
 function setStatus(label, detail) {
   elements.statusBadge.textContent = label;
@@ -29,6 +52,199 @@ function clearError() {
 function setBusy(isBusy) {
   elements.connectButton.disabled = isBusy;
   elements.disconnectButton.disabled = !isBusy;
+}
+
+function setVoiceState(label, detail, stateClass = "") {
+  elements.voiceStatusBadge.textContent = label;
+  elements.voiceStatusDetail.textContent = detail;
+  elements.voiceStatusBadge.classList.remove("voice-state-listening", "voice-state-awaiting");
+  if (stateClass) {
+    elements.voiceStatusBadge.classList.add(stateClass);
+  }
+}
+
+function setLastVoiceCommand(commandText) {
+  elements.voiceLastCommand.textContent = `Derniere commande: ${commandText}`;
+}
+
+function normalizeSpeechText(text) {
+  return text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function sanitizeWakeWords(rawWakeWords) {
+  if (!Array.isArray(rawWakeWords)) {
+    return ["ok jarvis", "okay jarvis"];
+  }
+
+  const normalizedWakeWords = rawWakeWords
+    .map((item) => normalizeSpeechText(String(item || "")))
+    .filter((item) => item.length > 0);
+
+  return normalizedWakeWords.length > 0 ? [...new Set(normalizedWakeWords)] : ["ok jarvis", "okay jarvis"];
+}
+
+function sanitizeIdleTimeoutSeconds(rawValue) {
+  const parsed = Number(rawValue);
+  if (!Number.isFinite(parsed)) {
+    return 180;
+  }
+  const rounded = Math.round(parsed);
+  if (rounded < 5) {
+    return 5;
+  }
+  if (rounded > 3600) {
+    return 3600;
+  }
+  return rounded;
+}
+
+function parseWakeWordsInput(rawValue) {
+  const parts = String(rawValue || "")
+    .split(",")
+    .map((part) => part.trim())
+    .filter((part) => part.length > 0);
+  return sanitizeWakeWords(parts);
+}
+
+function updateSettingsInputs() {
+  elements.wakePhraseInput.value = activeWakeWords.join(", ");
+  elements.voiceIdleTimeoutInput.value = String(activeIdleTimeoutSeconds);
+}
+
+function loadPersistedVoiceSettings() {
+  try {
+    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
+    if (!raw) {
+      activeWakeWords = sanitizeWakeWords(DEFAULT_WAKE_WORDS);
+      activeIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(DEFAULT_IDLE_TIMEOUT_SECONDS);
+      updateSettingsInputs();
+      return;
+    }
+
+    const parsed = JSON.parse(raw);
+    activeWakeWords = sanitizeWakeWords(parsed.wakeWords);
+    activeIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(parsed.idleTimeoutSeconds);
+    updateSettingsInputs();
+  } catch (error) {
+    console.error(error);
+    activeWakeWords = sanitizeWakeWords(DEFAULT_WAKE_WORDS);
+    activeIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(DEFAULT_IDLE_TIMEOUT_SECONDS);
+    updateSettingsInputs();
+  }
+}
+
+function persistVoiceSettings() {
+  window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
+    wakeWords: activeWakeWords,
+    idleTimeoutSeconds: activeIdleTimeoutSeconds,
+  }));
+}
+
+function applyVoiceSettings() {
+  const nextWakeWords = parseWakeWordsInput(elements.wakePhraseInput.value);
+  const nextIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(elements.voiceIdleTimeoutInput.value);
+
+  activeWakeWords = nextWakeWords;
+  activeIdleTimeoutSeconds = nextIdleTimeoutSeconds;
+  updateSettingsInputs();
+  persistVoiceSettings();
+
+  setVoiceState(
+    wakeWordListeningEnabled ? "Ecoute active" : "Desactivee",
+    `Wake phrases: ${activeWakeWords.join(" / ")} | Auto-off: ${activeIdleTimeoutSeconds}s`,
+    wakeWordListeningEnabled ? "voice-state-listening" : "",
+  );
+
+  if (wakeWordListeningEnabled) {
+    restartInactivityTimer();
+  }
+}
+
+function clearInactivityTimer() {
+  if (inactivityTimerId !== null) {
+    window.clearTimeout(inactivityTimerId);
+    inactivityTimerId = null;
+  }
+}
+
+function restartInactivityTimer() {
+  clearInactivityTimer();
+  if (!wakeWordListeningEnabled) {
+    return;
+  }
+  inactivityTimerId = window.setTimeout(() => {
+    stopWakeWordListening("Auto-off active apres inactivite.");
+  }, activeIdleTimeoutSeconds * 1000);
+}
+
+function extractWakeWordPayload(normalizedText) {
+  for (const wakeWord of activeWakeWords) {
+    const position = normalizedText.indexOf(wakeWord);
+    if (position !== -1) {
+      const afterWake = normalizedText.slice(position + wakeWord.length).trim();
+      return {
+        matched: true,
+        commandText: afterWake,
+      };
+    }
+  }
+
+  return {
+    matched: false,
+    commandText: "",
+  };
+}
+
+function inferLocalVoiceIntent(commandText) {
+  const normalized = normalizeSpeechText(commandText);
+
+  if (!normalized) {
+    return "unknown";
+  }
+
+  if (/\b(connect|reconnect|start|demarre|ouvre|open)\b/.test(normalized)) {
+    return "connect";
+  }
+
+  if (/\b(disconnect|stop|arrete|close|shutdown|quit)\b/.test(normalized)) {
+    return "disconnect";
+  }
+
+  if (/\b(status|statut|state|health)\b/.test(normalized)) {
+    return "status";
+  }
+
+  return "server";
+}
+
+function beginAwaitingVoiceCommand() {
+  awaitingVoiceCommand = true;
+  commandDeadlineAt = Date.now() + COMMAND_CAPTURE_WINDOW_MS;
+  restartInactivityTimer();
+  setVoiceState(
+    "En attente",
+    "Wake word detecte. Prononcez votre commande maintenant.",
+    "voice-state-awaiting",
+  );
+}
+
+function resetAwaitingVoiceCommand() {
+  awaitingVoiceCommand = false;
+  commandDeadlineAt = 0;
+  if (wakeWordListeningEnabled) {
+    restartInactivityTimer();
+    setVoiceState(
+      "Ecoute active",
+      "Dites \"Ok Jarvis\" pour demarrer une commande.",
+      "voice-state-listening",
+    );
+  }
 }
 
 async function requestLocalStream() {
@@ -69,7 +285,7 @@ function buildPeerConnection() {
 
   connection.addEventListener("iceconnectionstatechange", () => {
     if (connection.iceConnectionState === "failed") {
-      showError("La connexion ICE a échoué. Vérifie le Wi-Fi local ou le tunnel HTTPS.");
+      showError("La connexion ICE a echoue. Verifie le Wi-Fi local ou le tunnel HTTPS.");
     }
   });
 
@@ -96,7 +312,7 @@ async function fetchStatus() {
   const response = await fetch("/api/webrtc/status");
   const payload = await response.json();
   const detail = payload.active
-    ? `Session ${payload.state}, état pair: ${payload.connectionState}.`
+    ? `Session ${payload.state}, etat pair: ${payload.connectionState}.`
     : payload.error || "Aucune session active.";
   setStatus(payload.state, detail);
 }
@@ -105,7 +321,7 @@ function startStatusPolling() {
   stopStatusPolling();
   statusInterval = window.setInterval(() => {
     fetchStatus().catch(() => {
-      showError("Impossible de joindre le serveur pour récupérer le statut.");
+      showError("Impossible de joindre le serveur pour recuperer le statut.");
     });
   }, 2000);
 }
@@ -121,7 +337,7 @@ async function connect() {
   clearError();
 
   if (!window.isSecureContext && window.location.hostname !== "localhost") {
-    showError("Le navigateur mobile exige HTTPS pour ouvrir caméra et micro.");
+    showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
     return;
   }
 
@@ -131,7 +347,7 @@ async function connect() {
   }
 
   setBusy(true);
-  setStatus("Préparation", "Demande des permissions caméra et micro...");
+  setStatus("Preparation", "Demande des permissions camera et micro...");
 
   try {
     localStream = await requestLocalStream();
@@ -146,7 +362,7 @@ async function connect() {
     await peerConnection.setLocalDescription(offer);
     await waitForIceGatheringComplete(peerConnection);
 
-    setStatus("Négociation", "Envoi de l'offre WebRTC au serveur...");
+    setStatus("Negociation", "Envoi de l'offre WebRTC au serveur...");
     const response = await fetch("/api/webrtc/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -155,17 +371,17 @@ async function connect() {
 
     const payload = await response.json();
     if (!response.ok) {
-      throw new Error(payload.error || "La négociation WebRTC a échoué.");
+      throw new Error(payload.error || "La negociation WebRTC a echoue.");
     }
 
     await peerConnection.setRemoteDescription(payload);
-    setStatus("Streaming", "Le flux mobile est connecté au serveur.");
+    setStatus("Streaming", "Le flux mobile est connecte au serveur.");
     startStatusPolling();
   } catch (error) {
     console.error(error);
     await disconnect({ notifyServer: true, preserveStatus: true });
-    showError(error.message || "La connexion a échoué.");
-    setStatus("Erreur", "Le flux n'a pas pu être établi.");
+    showError(error.message || "La connexion a echoue.");
+    setStatus("Erreur", "Le flux n'a pas pu etre etabli.");
   }
 }
 
@@ -201,6 +417,206 @@ async function disconnect(options = {}) {
   }
 }
 
+async function executeVoiceCommand(commandText) {
+  const cleaned = commandText.trim();
+  if (!cleaned) {
+    setVoiceState(
+      "En attente",
+      "Commande vide. Dites \"Ok Jarvis\" puis une commande claire.",
+      "voice-state-awaiting",
+    );
+    return;
+  }
+
+  setLastVoiceCommand(cleaned);
+  const localIntent = inferLocalVoiceIntent(cleaned);
+
+  try {
+    if (localIntent === "connect") {
+      await connect();
+      setVoiceState(
+        "Commande executee",
+        "Connexion lancee depuis la commande vocale.",
+        "voice-state-listening",
+      );
+      return;
+    }
+
+    if (localIntent === "disconnect") {
+      await disconnect();
+      setVoiceState(
+        "Commande executee",
+        "Deconnexion lancee depuis la commande vocale.",
+        "voice-state-listening",
+      );
+      return;
+    }
+
+    if (localIntent === "status") {
+      await fetchStatus();
+      setVoiceState(
+        "Commande executee",
+        "Statut serveur mis a jour.",
+        "voice-state-listening",
+      );
+      return;
+    }
+
+    const response = await fetch("/api/webrtc/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        command: cleaned,
+        payload: {
+          text: cleaned,
+          source: "voice",
+          final: true,
+        },
+      }),
+    });
+
+    const payload = await response.json();
+    if (!response.ok) {
+      throw new Error(payload.error || "Erreur lors de l'execution de la commande vocale.");
+    }
+
+    if (payload.command === "unknown") {
+      setVoiceState(
+        "Non reconnu",
+        "Commande non reconnue. Reessayez apres \"Ok Jarvis\".",
+        "voice-state-listening",
+      );
+      return;
+    }
+
+    setVoiceState(
+      "Commande executee",
+      `Action: ${payload.command}`,
+      "voice-state-listening",
+    );
+  } catch (error) {
+    console.error(error);
+    setVoiceState(
+      "Erreur",
+      error.message || "La commande vocale a echoue.",
+      "voice-state-listening",
+    );
+  }
+}
+
+function handleSpeechResult(event) {
+  restartInactivityTimer();
+  for (let i = event.resultIndex; i < event.results.length; i += 1) {
+    const result = event.results[i];
+    if (!result.isFinal) {
+      continue;
+    }
+
+    const transcript = result[0]?.transcript || "";
+    const normalized = normalizeSpeechText(transcript);
+    if (!normalized) {
+      continue;
+    }
+
+    if (awaitingVoiceCommand && commandDeadlineAt > 0 && Date.now() > commandDeadlineAt) {
+      resetAwaitingVoiceCommand();
+    }
+
+    if (!awaitingVoiceCommand) {
+      const wakeDetection = extractWakeWordPayload(normalized);
+      if (!wakeDetection.matched) {
+        continue;
+      }
+
+      beginAwaitingVoiceCommand();
+
+      if (wakeDetection.commandText) {
+        executeVoiceCommand(wakeDetection.commandText).finally(() => {
+          resetAwaitingVoiceCommand();
+        });
+      }
+      continue;
+    }
+
+    executeVoiceCommand(normalized).finally(() => {
+      resetAwaitingVoiceCommand();
+    });
+  }
+}
+
+function ensureSpeechRecognition() {
+  if (!SpeechRecognitionCtor) {
+    setVoiceState(
+      "Indisponible",
+      "La reconnaissance vocale n'est pas supportee sur ce navigateur.",
+    );
+    elements.voiceToggleButton.disabled = true;
+    return false;
+  }
+
+  if (!speechRecognition) {
+    speechRecognition = new SpeechRecognitionCtor();
+    speechRecognition.continuous = true;
+    speechRecognition.interimResults = false;
+    speechRecognition.lang = "fr-FR";
+    speechRecognition.addEventListener("result", handleSpeechResult);
+    speechRecognition.addEventListener("error", (event) => {
+      setVoiceState(
+        "Erreur",
+        `Reconnaissance vocale indisponible (${event.error}).`,
+      );
+    });
+    speechRecognition.addEventListener("end", () => {
+      if (wakeWordListeningEnabled) {
+        try {
+          speechRecognition.start();
+        } catch (error) {
+          console.error(error);
+        }
+      }
+    });
+  }
+
+  return true;
+}
+
+function startWakeWordListening() {
+  if (!ensureSpeechRecognition()) {
+    return;
+  }
+
+  wakeWordListeningEnabled = true;
+  resetAwaitingVoiceCommand();
+  elements.voiceToggleButton.textContent = "Desactiver l'ecoute vocale";
+  restartInactivityTimer();
+  setVoiceState(
+    "Ecoute active",
+    `Dites \"${activeWakeWords[0]}\" pour demarrer une commande. Auto-off ${activeIdleTimeoutSeconds}s.`,
+    "voice-state-listening",
+  );
+
+  try {
+    speechRecognition.start();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function stopWakeWordListening(detail = "Cliquez pour reactiver l'ecoute wake-word.") {
+  wakeWordListeningEnabled = false;
+  resetAwaitingVoiceCommand();
+  clearInactivityTimer();
+  elements.voiceToggleButton.textContent = "Activer l'ecoute vocale";
+  setVoiceState(
+    "Desactivee",
+    detail,
+  );
+
+  if (speechRecognition) {
+    speechRecognition.stop();
+  }
+}
+
 elements.connectButton.addEventListener("click", () => {
   connect().catch((error) => {
     console.error(error);
@@ -211,12 +627,30 @@ elements.connectButton.addEventListener("click", () => {
 elements.disconnectButton.addEventListener("click", () => {
   disconnect().catch((error) => {
     console.error(error);
-    showError("La déconnexion a échoué.");
+    showError("La deconnexion a echoue.");
   });
+});
+
+elements.voiceToggleButton.addEventListener("click", () => {
+  if (wakeWordListeningEnabled) {
+    stopWakeWordListening();
+    return;
+  }
+
+  startWakeWordListening();
+});
+
+elements.voiceSaveSettingsButton.addEventListener("click", () => {
+  applyVoiceSettings();
 });
 
 window.addEventListener("beforeunload", () => {
   stopStatusPolling();
+  wakeWordListeningEnabled = false;
+  clearInactivityTimer();
+  if (speechRecognition) {
+    speechRecognition.stop();
+  }
   if (peerConnection) {
     peerConnection.close();
   }
@@ -226,5 +660,16 @@ window.addEventListener("beforeunload", () => {
 });
 
 fetchStatus().catch(() => {
-  setStatus("Serveur", "Le serveur est prêt, mais le statut initial n'a pas pu être lu.");
+  setStatus("Serveur", "Le serveur est pret, mais le statut initial n'a pas pu etre lu.");
 });
+
+if (!SpeechRecognitionCtor) {
+  setVoiceState(
+    "Indisponible",
+    "La reconnaissance vocale n'est pas supportee sur ce navigateur.",
+  );
+  elements.voiceToggleButton.disabled = true;
+  elements.voiceSaveSettingsButton.disabled = true;
+}
+
+loadPersistedVoiceSettings();

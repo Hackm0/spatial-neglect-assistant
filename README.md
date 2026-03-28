@@ -9,6 +9,7 @@ caméra + micro depuis un téléphone via WebRTC.
 
 ```bash
 python3 -m pip install -r requirements.txt
+python3 -m playwright install chromium
 ```
 
 ### Démarrage
@@ -31,3 +32,5 @@ sécurisé pour ouvrir la caméra et le micro:
 - `MOBILE_INGEST_ICE_SERVERS`
 - `MOBILE_INGEST_ICE_TIMEOUT_SECONDS`
 - `MOBILE_INGEST_SESSION_SHUTDOWN_TIMEOUT_SECONDS`
+- `MOBILE_INGEST_VOICE_WAKE_PHRASES` (ex: `ok jarvis,okay jarvis`)
+- `MOBILE_INGEST_VOICE_IDLE_TIMEOUT_SECONDS` (auto-off de l'ecoute vocale)

@@ -22,6 +22,29 @@
         </div>
         <p id="status-detail" class="status-detail">Aucune session active.</p>
 
+        <div class="voice-panel" aria-live="polite">
+          <div class="status-row voice-status-row">
+            <span class="status-label">Activation vocale</span>
+            <span id="voice-status-badge" class="status-badge voice-badge">Désactivée</span>
+          </div>
+          <div class="voice-settings-grid">
+            <label class="voice-setting-label" for="wake-phrase-input">Wake phrase</label>
+            <input id="wake-phrase-input" class="voice-setting-input" type="text" autocomplete="off" spellcheck="false" value="Ok Jarvis, Okay Jarvis">
+            <label class="voice-setting-label" for="voice-idle-timeout-input">Auto-off (sec)</label>
+            <input id="voice-idle-timeout-input" class="voice-setting-input" type="number" min="5" max="3600" step="1" value="180">
+          </div>
+          <p id="voice-status-detail" class="status-detail voice-status-detail">
+            Dites "Ok Jarvis" pour activer l'écoute de commande.
+          </p>
+          <p id="voice-last-command" class="voice-last-command">Dernière commande: aucune</p>
+          <button id="voice-save-settings-button" type="button" class="voice-save-settings-button">
+            Sauvegarder les réglages vocaux
+          </button>
+          <button id="voice-toggle-button" type="button" class="secondary voice-toggle-button">
+            Activer l'écoute vocale
+          </button>
+        </div>
+
         <video id="local-preview" class="preview" autoplay playsinline muted></video>
 
         <div class="button-row">
@@ -38,6 +61,8 @@
     <script>
       window.APP_CONFIG = {
         iceServers: {{ ice_servers | tojson }},
+        voiceWakePhrases: {{ voice_wake_phrases | tojson }},
+        voiceIdleTimeoutSeconds: {{ voice_idle_timeout_seconds | tojson }},
       };
     </script>
     <script src="{{ url_for('static', filename='app.js') }}" defer></script>

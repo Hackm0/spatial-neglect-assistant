@@ -72,3 +72,16 @@ def test_classify_transcript_add_alias() -> None:
 
   assert result.command == "transcript_add"
   assert result.arguments["text"] == "hello world"
+
+
+def test_classify_natural_language_status_phrase() -> None:
+  result = classifier.classify({"command": "what is the current status"})
+
+  assert result.command == "status"
+  assert result.raw_command == "what is the current status"
+
+
+def test_classify_natural_language_transcript_clear_phrase() -> None:
+  result = classifier.classify({"action": "please clear transcript now"})
+
+  assert result.command == "transcript_clear"

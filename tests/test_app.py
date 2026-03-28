@@ -145,6 +145,15 @@ def test_index_renders(client) -> None:
   assert "Connexion mobile temps réel" in response.get_data(as_text=True)
 
 
+def test_index_exposes_voice_settings(client) -> None:
+  response = client.get("/")
+
+  assert response.status_code == 200
+  body = response.get_data(as_text=True)
+  assert "voiceWakePhrases" in body
+  assert "voiceIdleTimeoutSeconds" in body
+
+
 def test_status_route_returns_json(client) -> None:
   response = client.get("/api/webrtc/status")
 
@@ -212,6 +221,18 @@ def test_command_route_supports_close_alias(client) -> None:
   assert response.status_code == 200
   payload = response.get_json()
   assert payload["command"] == "close_session"
+  assert payload["result"]["state"] == "idle"
+
+
+def test_command_route_supports_natural_language_phrase(client) -> None:
+  response = client.post(
+      "/api/webrtc/command",
+      json={"command": "could you show me the current status"},
+  )
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["command"] == "status"
   assert payload["result"]["state"] == "idle"
 
 

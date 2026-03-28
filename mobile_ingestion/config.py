@@ -31,6 +31,19 @@ def _parse_ice_servers(raw_value: Any) -> tuple[str, ...]:
   return ("stun:stun.l.google.com:19302",)
 
 
+def _parse_wake_phrases(raw_value: Any) -> tuple[str, ...]:
+  if raw_value is None:
+    return ("ok jarvis", "okay jarvis")
+  if isinstance(raw_value, str):
+    items = [item.strip().lower() for item in raw_value.split(",")]
+    parsed = tuple(item for item in items if item)
+    return parsed or ("ok jarvis", "okay jarvis")
+  if isinstance(raw_value, (list, tuple)):
+    parsed = tuple(str(item).strip().lower() for item in raw_value if str(item).strip())
+    return parsed or ("ok jarvis", "okay jarvis")
+  return ("ok jarvis", "okay jarvis")
+
+
 @dataclass(frozen=True, slots=True)
 class AppConfig:
   host: str = "0.0.0.0"
@@ -41,6 +54,8 @@ class AppConfig:
   ice_servers: tuple[str, ...] = ("stun:stun.l.google.com:19302",)
   ice_gathering_timeout_seconds: float = 10.0
   session_shutdown_timeout_seconds: float = 5.0
+  voice_wake_phrases: tuple[str, ...] = ("ok jarvis", "okay jarvis")
+  voice_idle_timeout_seconds: int = 180
 
   @classmethod
   def from_mapping(cls,
@@ -60,6 +75,11 @@ class AppConfig:
         "session_shutdown_timeout_seconds": float(
             os.getenv("MOBILE_INGEST_SESSION_SHUTDOWN_TIMEOUT_SECONDS",
                       defaults.session_shutdown_timeout_seconds)),
+        "voice_wake_phrases": _parse_wake_phrases(
+          os.getenv("MOBILE_INGEST_VOICE_WAKE_PHRASES")),
+        "voice_idle_timeout_seconds": int(
+          os.getenv("MOBILE_INGEST_VOICE_IDLE_TIMEOUT_SECONDS",
+                defaults.voice_idle_timeout_seconds)),
     }
     if overrides:
       for key, value in overrides.items():
@@ -75,6 +95,10 @@ class AppConfig:
             "session_shutdown_timeout_seconds",
         }:
           values[normalized_key] = float(value)
+        elif normalized_key in {"voice_idle_timeout_seconds"}:
+          values[normalized_key] = int(value)
+        elif normalized_key in {"voice_wake_phrases"}:
+          values[normalized_key] = _parse_wake_phrases(value)
         elif normalized_key in values:
           values[normalized_key] = value
     return cls(**values)

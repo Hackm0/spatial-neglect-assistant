@@ -128,7 +128,15 @@ class CommandClassifier:
     if raw_command is None:
       return "unknown"
     normalized = self._normalize_token(raw_command)
-    return _COMMAND_ALIASES.get(normalized, "unknown")
+    direct_match = _COMMAND_ALIASES.get(normalized)
+    if direct_match:
+      return direct_match
+
+    inferred = self._infer_from_phrase(normalized)
+    if inferred:
+      return inferred
+
+    return "unknown"
 
   def _normalize_token(self, raw: str) -> str:
     normalized = re.sub(r"[^a-z0-9]+", "_", raw.strip().lower())
@@ -149,3 +157,44 @@ class CommandClassifier:
           return True
 
     return False
+
+  def _infer_from_phrase(self, normalized: str) -> str | None:
+    tokens = {token for token in normalized.split("_") if token}
+
+    if not tokens:
+      return None
+
+    transcript_tokens = {
+        "transcript",
+        "caption",
+        "captions",
+        "subtitle",
+        "subtitles",
+        "text",
+        "texte",
+        "transcribe",
+    }
+    if tokens.intersection(transcript_tokens):
+      if tokens.intersection({"clear", "reset", "delete", "erase", "wipe", "clean"}):
+        return "transcript_clear"
+      if tokens.intersection({"get", "show", "read", "status", "list", "display"}):
+        return "transcript_get"
+      if tokens.intersection({"add", "note", "save", "write", "append", "record", "transcribe"}):
+        return "transcript_add"
+      return "transcript_get"
+
+    if tokens.intersection({"ping", "heartbeat", "alive"}):
+      return "ping"
+
+    if tokens.intersection({"status", "state", "health", "ready"}):
+      return "status"
+
+    close_tokens = {"close", "disconnect", "stop", "terminate", "end", "shutdown", "quit"}
+    if tokens.intersection(close_tokens):
+      return "close_session"
+
+    offer_tokens = {"connect", "start", "open", "resume", "reconnect", "negotiate"}
+    if tokens.intersection(offer_tokens) and tokens.intersection({"session", "stream", "webrtc", "connection"}):
+      return "offer"
+
+    return None
