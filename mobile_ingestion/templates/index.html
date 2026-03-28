@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Mobile Ingestion</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <main class="app-shell">
+      <section class="card">
+        <div class="eyebrow">Spatial Neglect Assistant</div>
+        <h1>Connexion mobile temps réel</h1>
+        <p class="description">
+          Cette page ouvre la caméra et le micro du téléphone, puis envoie le flux
+          au serveur Flask via WebRTC.
+        </p>
+
+        <div class="status-row">
+          <span class="status-label">Statut</span>
+          <span id="status-badge" class="status-badge">En attente</span>
+        </div>
+        <p id="status-detail" class="status-detail">Aucune session active.</p>
+
+        <video id="local-preview" class="preview" autoplay playsinline muted></video>
+
+        <div class="button-row">
+          <button id="connect-button" type="button">Connecter</button>
+          <button id="disconnect-button" type="button" class="secondary" disabled>
+            Déconnecter
+          </button>
+        </div>
+
+        <p id="error-message" class="error-message" hidden></p>
+      </section>
+    </main>
+
+    <script>
+      window.APP_CONFIG = {
+        iceServers: {{ ice_servers | tojson }},
+      };
+    </script>
+    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
+  </body>
+</html>
