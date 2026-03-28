@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spatial Detection – Camera Stream</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <div class="logo">
+        <div class="logo-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M20.188 10.934l-1.461-2.53a2 2 0 0 0-1.728-1H7a2 2 0 0 0-1.729 1L3.812 10.934A4 4 0 0 0 3 13v4a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-4a4 4 0 0 0-.812-2.066z"/>
+          </svg>
+        </div>
+        <span>Spatial Detection</span>
+      </div>
+      <div id="status-badge" class="badge badge-idle">
+        <span class="dot"></span>
+        <span id="status-text">Inactif</span>
+      </div>
+    </header>
+
+    <main>
+      <div class="sidebar">
+        <div class="controls">
+          <button id="startBtn" class="btn btn-primary" onclick="startStream()">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+              <circle cx="12" cy="12" r="10"/>
+              <polygon points="10,8 16,12 10,16" fill="white"/>
+            </svg>
+            Démarrer la caméra
+          </button>
+          <button id="stopBtn" class="btn btn-danger hidden" onclick="stopStream()">
+            <svg viewBox="0 0 24 24" fill="currentColor" width="18" height="18">
+              <circle cx="12" cy="12" r="10"/>
+              <rect x="9" y="9" width="6" height="6" fill="white"/>
+            </svg>
+            Arrêter
+          </button>
+        </div>
+
+        <div class="info-card">
+          <h3>Instructions</h3>
+          <ol>
+            <li>Lancez le serveur Python : <code>python server.py</code></li>
+            <li>Appuyez sur <strong>Démarrer la caméra</strong></li>
+            <li>Autorisez l'accès à la caméra</li>
+            <li>Les objets détectés apparaissent en temps réel</li>
+          </ol>
+        </div>
+
+        <div class="ws-status-card info-card">
+          <h3>Serveur détection</h3>
+          <div class="ws-row">
+            <div id="ws-badge" class="badge badge-idle"><span class="dot"></span><span id="ws-text">Déconnecté</span></div>
+            <button id="detectToggle" class="btn btn-secondary" onclick="toggleDetection()" disabled>Détection OFF</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="video-wrapper">
+        <video id="localVideo" autoplay playsinline muted></video>
+        <canvas id="detectionCanvas"></canvas>
+        <div id="video-overlay" class="video-overlay">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M20.188 10.934l-1.461-2.53a2 2 0 0 0-1.728-1H7a2 2 0 0 0-1.729 1L3.812 10.934A4 4 0 0 0 3 13v4a1 1 0 0 0 1 1h16a1 1 0 0 0 1-1v-4a4 4 0 0 0-.812-2.066z"/>
+          </svg>
+          <p>La caméra n'est pas active</p>
+        </div>
+        <div id="stream-info" class="stream-info hidden">
+          <span id="resolution-label">–</span>
+          <span class="separator">·</span>
+          <span id="fps-label">– fps</span>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="stream.js"></script>
+</body>
+</html>
