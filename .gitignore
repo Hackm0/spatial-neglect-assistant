@@ -17,6 +17,10 @@ eggs/
 lib/
 !firmware/lib/
 firmware/lib/*
+!firmware/lib/Actuation/
+!firmware/lib/Actuation/src/
+!firmware/lib/Actuation/src/*.h
+!firmware/lib/Actuation/src/*.cpp
 !firmware/lib/SensorSupport/
 !firmware/lib/SensorSupport/src/
 !firmware/lib/SensorSupport/src/*.h
