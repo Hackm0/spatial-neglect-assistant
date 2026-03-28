@@ -1,0 +1,56 @@
+#pragma once
+
+#include <Arduino.h>
+#include <Wire.h>
+
+#include <ActuatorCommandSupervisor.h>
+#include <AnalogJoystick.h>
+#include <HardwareSerialByteStream.h>
+#include <HcSr04DistanceSensor.h>
+#include <MillisInterval.h>
+#include <Mpu9250Accelerometer.h>
+#include <ProtocolTypes.h>
+#include <ServoMotorController.h>
+#include <UartProtocolEndpoint.h>
+#include <VibrationMotorController.h>
+
+struct FirmwareApplicationConfig {
+  HcSr04Config distanceSensorConfig;
+  AnalogJoystickConfig joystickConfig;
+  ServoMotorConfig servoConfig;
+  VibrationMotorConfig vibrationMotorConfig;
+  ProtocolConfig protocolConfig;
+  unsigned long sensorSampleIntervalMs;
+  unsigned long accelerometerRetryIntervalMs;
+};
+
+class FirmwareApplication {
+ public:
+  FirmwareApplication(const FirmwareApplicationConfig& config,
+                      HardwareSerial& serial = Serial,
+                      TwoWire& wire = Wire);
+
+  bool begin();
+  void update(unsigned long nowMs);
+
+ private:
+  void applyActuatorCommand(const ActuatorCommand& command);
+  void captureDistanceState();
+  void refreshSensors();
+  void setAccelerometerUnavailable();
+  void updateAccelerometerInitialization(unsigned long nowMs);
+
+  const FirmwareApplicationConfig config_;
+  HardwareSerialByteStream serialTransport_;
+  UartProtocolEndpoint protocolEndpoint_;
+  Mpu9250Accelerometer accelerometer_;
+  AnalogJoystick joystick_;
+  HcSr04DistanceSensor distanceSensor_;
+  ServoMotorController servoMotor_;
+  VibrationMotorController vibrationMotor_;
+  MillisInterval sensorSampleInterval_;
+  MillisInterval telemetryInterval_;
+  MillisInterval accelerometerRetryInterval_;
+  ActuatorCommandSupervisor commandSupervisor_;
+  SensorSnapshot latestSnapshot_;
+};
