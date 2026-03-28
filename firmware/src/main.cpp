@@ -4,6 +4,7 @@
 #include <MillisInterval.h>
 #include <Mpu9250Accelerometer.h>
 #include <ServoMotorController.h>
+#include <VibrationMotorController.h>
 
 namespace {
 
@@ -13,10 +14,12 @@ constexpr uint8_t kJoystickXPin = A0;
 constexpr uint8_t kJoystickYPin = A1;
 constexpr uint8_t kJoystickButtonPin = 2U;
 constexpr uint8_t kServoPin = 9U;
+constexpr uint8_t kVibrationMotorPin = 22U;
 constexpr float kServoMinAngle = 0.0F;
 constexpr float kServoMaxAngle = 180.0F;
 constexpr float kServoInitialAngle = 90.0F;
 constexpr float kServoMaxDegreesPerSecond = 90.0F;
+constexpr float kVibrationActivationDistanceCm = 30.0F;
 constexpr float kMinControlInput = -1.0F;
 constexpr float kMaxControlInput = 1.0F;
 
@@ -51,10 +54,22 @@ const ServoMotorConfig kServoConfig = {
     kServoMaxDegreesPerSecond,
 };
 
+const VibrationMotorConfig kVibrationMotorConfig = {
+    kVibrationMotorPin,
+    true,
+};
+
+enum class DistanceReadingState : uint8_t {
+  kUnavailable,
+  kTimedOut,
+  kValid,
+};
+
 Mpu9250Accelerometer accelerometer;
 AnalogJoystick joystick(kJoystickConfig);
 HcSr04DistanceSensor distanceSensor(kDistanceSensorConfig);
 ServoMotorController servoMotor(kServoConfig);
+VibrationMotorController vibrationMotor(kVibrationMotorConfig);
 MillisInterval sensorSampleInterval(kSensorSampleIntervalMs);
 MillisInterval printInterval(kPrintIntervalMs);
 MillisInterval initRetryInterval(kInitRetryIntervalMs);
@@ -95,6 +110,28 @@ float combineControlInputs(const float joystickX,
   return (clampedAccelX + joystickX) * 0.5F;
 }
 
+DistanceReadingState currentDistanceReadingState() {
+  if (distanceSensor.lastMeasurementTimedOut()) {
+    return DistanceReadingState::kTimedOut;
+  }
+
+  if (!distanceSensor.hasReading()) {
+    return DistanceReadingState::kUnavailable;
+  }
+
+  return DistanceReadingState::kValid;
+}
+
+void updateVibrationMotorFromDistanceSensor() {
+  if (currentDistanceReadingState() != DistanceReadingState::kValid) {
+    vibrationMotor.turnOff();
+    return;
+  }
+
+  vibrationMotor.setEnabled(
+      distanceSensor.distanceCm() < kVibrationActivationDistanceCm);
+}
+
 void printTelemetry() {
   Serial.print(F("Joystick X: "));
   Serial.print(joystick.getX(), 3);
@@ -112,7 +149,23 @@ void printTelemetry() {
   }
 
   Serial.print(F(" | Servo target: "));
-  Serial.println(servoMotor.targetAngle(), 1);
+  Serial.print(servoMotor.targetAngle(), 1);
+  Serial.print(F(" | Distance: "));
+
+  switch (currentDistanceReadingState()) {
+    case DistanceReadingState::kUnavailable:
+      Serial.println(F("unavailable"));
+      return;
+
+    case DistanceReadingState::kTimedOut:
+      Serial.println(F("timeout"));
+      return;
+
+    case DistanceReadingState::kValid:
+      Serial.print(distanceSensor.distanceCm(), 1);
+      Serial.println(F(" cm"));
+      return;
+  }
 }
 
 void resetSensorCadence(const unsigned long nowMs) {
@@ -164,6 +217,7 @@ void setup() {
   if (!servoMotor.begin()) {
     Serial.println(F("Servo initialization failed."));
   }
+  vibrationMotor.begin();
   attemptAccelerometerInitialization(nowMs);
 }
 
@@ -171,7 +225,11 @@ void loop() {
   const unsigned long nowMs = millis();
 
   servoMotor.update(nowMs);
-  distanceSensor.update();
+  const bool distanceMeasurementCompleted = distanceSensor.update();
+
+  if (distanceMeasurementCompleted) {
+    updateVibrationMotorFromDistanceSensor();
+  }
 
   if (!accelerometer.isInitialized()) {
     if (initRetryInterval.isReady(nowMs)) {
