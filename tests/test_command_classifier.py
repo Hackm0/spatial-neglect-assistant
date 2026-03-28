@@ -60,3 +60,15 @@ def test_classify_root_key_command_shape() -> None:
   assert result.command == "close_session"
   assert result.raw_command == "disconnect"
   assert result.arguments["reason"] == "manual"
+
+
+def test_classify_transcript_add_alias() -> None:
+  result = classifier.classify({
+      "event": "caption",
+      "payload": {
+          "text": "hello world",
+      },
+  })
+
+  assert result.command == "transcript_add"
+  assert result.arguments["text"] == "hello world"

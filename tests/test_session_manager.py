@@ -8,6 +8,7 @@ import pytest
 
 from mobile_ingestion.analyzer import (AnalyzerMetrics, AnalyzerPort,
                                        AudioFrameEnvelope, SessionMetadata,
+                                       TranscriptEntry, TranscriptSnapshot,
                                        VideoFrameEnvelope)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto
@@ -23,6 +24,7 @@ class RecordingAnalyzer(AnalyzerPort):
     self.stopped_sessions: list[str] = []
     self.video_frames = 0
     self.audio_frames = 0
+    self.transcript_entries: list[TranscriptEntry] = []
 
   def on_session_started(self, metadata: SessionMetadata) -> None:
     self.started_sessions.append(metadata.session_id)
@@ -45,6 +47,22 @@ class RecordingAnalyzer(AnalyzerPort):
         video_frames=self.video_frames,
         audio_frames=self.audio_frames,
     )
+
+  def on_transcript(self, text: str, *, final: bool, source: str) -> None:
+    self.transcript_entries.append(
+        TranscriptEntry(
+            index=len(self.transcript_entries),
+            text=text,
+            final=final,
+            source=source,
+            created_at="test",
+        ))
+
+  def transcript_snapshot(self) -> TranscriptSnapshot:
+    return TranscriptSnapshot(entries=tuple(self.transcript_entries))
+
+  def clear_transcript(self) -> None:
+    self.transcript_entries.clear()
 
 
 @dataclass

@@ -44,6 +44,16 @@ _COMMAND_ALIASES: dict[str, str] = {
     "delete_session": "close_session",
     "ping": "ping",
     "heartbeat": "ping",
+    "transcript": "transcript_get",
+    "get_transcript": "transcript_get",
+    "transcript_status": "transcript_get",
+    "transcribe": "transcript_add",
+    "add_transcript": "transcript_add",
+    "transcript_add": "transcript_add",
+    "caption": "transcript_add",
+    "clear_transcript": "transcript_clear",
+    "reset_transcript": "transcript_clear",
+    "transcript_clear": "transcript_clear",
 }
 
 

@@ -46,6 +46,35 @@ class AnalyzerMetrics:
     }
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptEntry:
+  index: int
+  text: str
+  final: bool
+  source: str
+  created_at: str
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "index": self.index,
+        "text": self.text,
+        "final": self.final,
+        "source": self.source,
+        "createdAt": self.created_at,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptSnapshot:
+  entries: tuple[TranscriptEntry, ...]
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "entries": [entry.to_dict() for entry in self.entries],
+        "count": len(self.entries),
+    }
+
+
 class AnalyzerPort(ABC):
 
   @abstractmethod
@@ -68,11 +97,24 @@ class AnalyzerPort(ABC):
   def snapshot(self) -> AnalyzerMetrics:
     raise NotImplementedError
 
+  @abstractmethod
+  def on_transcript(self, text: str, *, final: bool, source: str) -> None:
+    raise NotImplementedError
+
+  @abstractmethod
+  def transcript_snapshot(self) -> TranscriptSnapshot:
+    raise NotImplementedError
+
+  @abstractmethod
+  def clear_transcript(self) -> None:
+    raise NotImplementedError
+
 
 class NoOpAnalyzer(AnalyzerPort):
 
   def __init__(self) -> None:
     self._metrics = AnalyzerMetrics()
+    self._transcript_entries: tuple[TranscriptEntry, ...] = ()
     self._lock = Lock()
 
   def on_session_started(self, metadata: SessionMetadata) -> None:
@@ -102,3 +144,27 @@ class NoOpAnalyzer(AnalyzerPort):
   def snapshot(self) -> AnalyzerMetrics:
     with self._lock:
       return self._metrics
+
+  def on_transcript(self, text: str, *, final: bool, source: str) -> None:
+    cleaned_text = text.strip()
+    if not cleaned_text:
+      return
+    cleaned_source = source.strip() or "server"
+    with self._lock:
+      next_index = len(self._transcript_entries)
+      entry = TranscriptEntry(
+          index=next_index,
+          text=cleaned_text,
+          final=final,
+          source=cleaned_source,
+          created_at=datetime.utcnow().isoformat() + "Z",
+      )
+      self._transcript_entries = self._transcript_entries + (entry,)
+
+  def transcript_snapshot(self) -> TranscriptSnapshot:
+    with self._lock:
+      return TranscriptSnapshot(entries=self._transcript_entries)
+
+  def clear_transcript(self) -> None:
+    with self._lock:
+      self._transcript_entries = ()

@@ -48,6 +48,38 @@ def close_session() -> tuple[str, int]:
   return "", 204
 
 
+@api_blueprint.get("/transcript")
+def transcript() -> tuple[dict[str, object], int]:
+  services = current_app.extensions["mobile_ingestion.services"]
+  return jsonify(services.analyzer.transcript_snapshot().to_dict()), 200
+
+
+@api_blueprint.post("/transcript")
+def add_transcript() -> tuple[dict[str, object], int]:
+  payload = request.get_json(silent=True)
+  if not isinstance(payload, dict):
+    return jsonify({"error": "Request body must be a JSON object."}), 400
+
+  text = payload.get("text")
+  if not isinstance(text, str) or not text.strip():
+    return jsonify({"error": "Field 'text' must be a non-empty string."}), 400
+
+  final = bool(payload.get("final", True))
+  source_raw = payload.get("source", "server")
+  source = source_raw if isinstance(source_raw, str) else "server"
+
+  services = current_app.extensions["mobile_ingestion.services"]
+  services.analyzer.on_transcript(text=text, final=final, source=source)
+  return jsonify(services.analyzer.transcript_snapshot().to_dict()), 200
+
+
+@api_blueprint.delete("/transcript")
+def clear_transcript() -> tuple[str, int]:
+  services = current_app.extensions["mobile_ingestion.services"]
+  services.analyzer.clear_transcript()
+  return "", 204
+
+
 @api_blueprint.post("/command")
 def command() -> tuple[dict[str, object], int]:
   payload = request.get_json(silent=True)
@@ -97,11 +129,48 @@ def command() -> tuple[dict[str, object], int]:
         },
     }), 200
 
+  if classified.command == "transcript_get":
+    return jsonify({
+        "command": classified.command,
+        "result": services.analyzer.transcript_snapshot().to_dict(),
+    }), 200
+
+  if classified.command == "transcript_add":
+    text_value = classified.arguments.get("text")
+    if not isinstance(text_value, str) or not text_value.strip():
+      return jsonify({
+          "error": "Field 'text' must be a non-empty string.",
+          "command": classified.command,
+      }), 400
+    final = bool(classified.arguments.get("final", True))
+    source_raw = classified.arguments.get("source", "server")
+    source = source_raw if isinstance(source_raw, str) else "server"
+    services.analyzer.on_transcript(text=text_value, final=final, source=source)
+    return jsonify({
+        "command": classified.command,
+        "result": services.analyzer.transcript_snapshot().to_dict(),
+    }), 200
+
+  if classified.command == "transcript_clear":
+    services.analyzer.clear_transcript()
+    return jsonify({
+        "command": classified.command,
+        "result": services.analyzer.transcript_snapshot().to_dict(),
+    }), 200
+
   return jsonify({
       "command": "unknown",
       "rawCommand": classified.raw_command,
       "result": {
-          "supportedCommands": ["offer", "status", "close_session", "ping"],
+          "supportedCommands": [
+            "offer",
+            "status",
+            "close_session",
+            "ping",
+            "transcript_get",
+            "transcript_add",
+            "transcript_clear",
+          ],
           "note": "Provide a command via keys like 'command', 'action', or 'event'.",
       },
   }), 422

@@ -5,7 +5,9 @@ from dataclasses import dataclass
 import pytest
 
 from mobile_ingestion import create_app
-from mobile_ingestion.analyzer import AnalyzerMetrics, AnalyzerPort, SessionMetadata
+from mobile_ingestion.analyzer import (AnalyzerMetrics, AnalyzerPort,
+                                       SessionMetadata, TranscriptEntry,
+                                       TranscriptSnapshot)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto
 from mobile_ingestion.services import ServiceContainer
@@ -15,6 +17,7 @@ class RecordingAnalyzer(AnalyzerPort):
 
   def __init__(self) -> None:
     self.metrics = AnalyzerMetrics()
+    self.transcript_entries: list[TranscriptEntry] = []
 
   def on_session_started(self, metadata: SessionMetadata) -> None:
     del metadata
@@ -42,6 +45,22 @@ class RecordingAnalyzer(AnalyzerPort):
 
   def snapshot(self) -> AnalyzerMetrics:
     return self.metrics
+
+  def on_transcript(self, text: str, *, final: bool, source: str) -> None:
+    self.transcript_entries.append(
+        TranscriptEntry(
+            index=len(self.transcript_entries),
+            text=text,
+            final=final,
+            source=source,
+            created_at="test",
+        ))
+
+  def transcript_snapshot(self) -> TranscriptSnapshot:
+    return TranscriptSnapshot(entries=tuple(self.transcript_entries))
+
+  def clear_transcript(self) -> None:
+    self.transcript_entries.clear()
 
 
 @dataclass
@@ -203,3 +222,118 @@ def test_command_route_returns_unknown_for_unhandled_command(client) -> None:
   payload = response.get_json()
   assert payload["command"] == "unknown"
   assert payload["rawCommand"] == "do-magic"
+
+
+def test_transcript_crud_routes(client) -> None:
+  add_response = client.post(
+      "/api/webrtc/transcript",
+      json={
+          "text": "patient says hello",
+          "final": True,
+          "source": "asr",
+      },
+  )
+  assert add_response.status_code == 200
+  added_payload = add_response.get_json()
+  assert added_payload["count"] == 1
+  assert added_payload["entries"][0]["text"] == "patient says hello"
+
+  get_response = client.get("/api/webrtc/transcript")
+  assert get_response.status_code == 200
+  get_payload = get_response.get_json()
+  assert get_payload["count"] == 1
+
+  clear_response = client.delete("/api/webrtc/transcript")
+  assert clear_response.status_code == 204
+
+  empty_response = client.get("/api/webrtc/transcript")
+  assert empty_response.status_code == 200
+  assert empty_response.get_json()["count"] == 0
+
+
+def test_command_route_supports_transcript_commands(client) -> None:
+  add_response = client.post(
+      "/api/webrtc/command",
+      json={
+          "command": "caption",
+          "payload": {
+              "text": "turn left",
+              "final": False,
+              "source": "speech",
+          },
+      },
+  )
+  assert add_response.status_code == 200
+  add_payload = add_response.get_json()
+  assert add_payload["command"] == "transcript_add"
+  assert add_payload["result"]["count"] == 1
+
+  get_response = client.post("/api/webrtc/command", json={"command": "transcript"})
+  assert get_response.status_code == 200
+  get_payload = get_response.get_json()
+  assert get_payload["command"] == "transcript_get"
+  assert get_payload["result"]["count"] == 1
+
+  clear_response = client.post(
+      "/api/webrtc/command",
+      json={"action": "clear_transcript"},
+  )
+  assert clear_response.status_code == 200
+  clear_payload = clear_response.get_json()
+  assert clear_payload["command"] == "transcript_clear"
+  assert clear_payload["result"]["count"] == 0
+
+
+def test_command_route_transcript_end_to_end_flow(client) -> None:
+  first_add = client.post(
+      "/api/webrtc/command",
+      json={
+          "command": "transcript_add",
+          "payload": {
+              "text": "patient ready",
+              "final": True,
+              "source": "speech-v1",
+          },
+      },
+  )
+  assert first_add.status_code == 200
+
+  second_add = client.post(
+      "/api/webrtc/command",
+      json={
+          "command": "transcribe",
+          "payload": {
+              "text": "move to the right",
+              "final": False,
+              "source": "speech-v1",
+          },
+      },
+  )
+  assert second_add.status_code == 200
+
+  get_response = client.post(
+      "/api/webrtc/command",
+      json={"command": "get_transcript"},
+  )
+  assert get_response.status_code == 200
+  transcript_payload = get_response.get_json()
+  assert transcript_payload["command"] == "transcript_get"
+  assert transcript_payload["result"]["count"] == 2
+  assert transcript_payload["result"]["entries"][0]["text"] == "patient ready"
+  assert transcript_payload["result"]["entries"][0]["final"] is True
+  assert transcript_payload["result"]["entries"][1]["text"] == "move to the right"
+  assert transcript_payload["result"]["entries"][1]["final"] is False
+
+  clear_response = client.post(
+      "/api/webrtc/command",
+      json={"action": "reset_transcript"},
+  )
+  assert clear_response.status_code == 200
+  assert clear_response.get_json()["result"]["count"] == 0
+
+  get_after_clear = client.post(
+      "/api/webrtc/command",
+      json={"event": "transcript"},
+  )
+  assert get_after_clear.status_code == 200
+  assert get_after_clear.get_json()["result"]["count"] == 0
