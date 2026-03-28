@@ -15,6 +15,12 @@ downloads/
 eggs/
 .eggs/
 lib/
+!firmware/lib/
+firmware/lib/*
+!firmware/lib/SensorSupport/
+!firmware/lib/SensorSupport/src/
+!firmware/lib/SensorSupport/src/*.h
+!firmware/lib/SensorSupport/src/*.cpp
 lib64/
 parts/
 sdist/
