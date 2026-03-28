@@ -1,13 +1,10 @@
 # UART Protocol
 
 ## Overview
-- Transport: point-to-point UART over `Serial`
 - Link settings: `115200 8N1`
-- Topology: exactly two devices
-- Endianness: little-endian for all multi-byte fields, including CRC bytes
-- Reliability model: CRC validation plus periodic resend from the host; no ACK layer in v1
+- Little-endian
 
-The firmware never writes human-readable text to `Serial`. All sensor output is published as binary telemetry frames.
+All sensor output is published as binary telemetry frames.
 
 ## Frame Layout
 
@@ -126,25 +123,3 @@ Breakdown:
 - Drop any frame with payload length greater than `32`.
 - Drop `ActuatorCommand` frames with reserved flag bits set.
 - Unknown message types may be ignored after CRC validation.
-
-Receiver pseudocode:
-
-```text
-state = WAIT_SYNC_1
-
-for each incoming byte:
-  if state == WAIT_SYNC_1:
-    if byte == 0xA5: state = WAIT_SYNC_2
-  else if state == WAIT_SYNC_2:
-    if byte == 0x5A: state = READ_VERSION
-    else if byte != 0xA5: state = WAIT_SYNC_1
-  else:
-    collect version/type/sequence/length/payload/crc incrementally
-    if version invalid or payload length > 32:
-      state = WAIT_SYNC_1
-    if full frame received:
-      compute CRC over version..payload
-      if CRC matches:
-        dispatch message
-      state = WAIT_SYNC_1
-```
