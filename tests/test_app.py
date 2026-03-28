@@ -155,3 +155,51 @@ def test_delete_session_is_idempotent(client) -> None:
 
   assert first_response.status_code == 204
   assert second_response.status_code == 204
+
+
+def test_command_route_supports_status_alias(client) -> None:
+  response = client.post("/api/webrtc/command", json={"action": "state"})
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["command"] == "status"
+  assert payload["result"]["state"] == "idle"
+
+
+def test_command_route_supports_nested_offer_payload(client) -> None:
+  response = client.post(
+      "/api/webrtc/command",
+      json={
+          "command": "connect",
+          "payload": {
+              "sdp": "offer-sdp",
+              "type": "offer",
+          },
+      },
+  )
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["command"] == "offer"
+  assert payload["result"] == {
+      "sdp": "answer-sdp",
+      "type": "answer",
+  }
+
+
+def test_command_route_supports_close_alias(client) -> None:
+  response = client.post("/api/webrtc/command", json={"event": "disconnect"})
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["command"] == "close_session"
+  assert payload["result"]["state"] == "idle"
+
+
+def test_command_route_returns_unknown_for_unhandled_command(client) -> None:
+  response = client.post("/api/webrtc/command", json={"command": "do-magic"})
+
+  assert response.status_code == 422
+  payload = response.get_json()
+  assert payload["command"] == "unknown"
+  assert payload["rawCommand"] == "do-magic"

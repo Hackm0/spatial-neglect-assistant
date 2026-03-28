@@ -1,0 +1,141 @@
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any, Mapping
+
+
+_COMMAND_KEYS = (
+    "command",
+    "cmd",
+    "action",
+    "type",
+    "event",
+    "intent",
+    "operation",
+)
+
+_PAYLOAD_KEYS = (
+    "payload",
+    "data",
+    "params",
+    "args",
+    "arguments",
+    "body",
+)
+
+_COMMAND_ALIASES: dict[str, str] = {
+    "offer": "offer",
+    "webrtc_offer": "offer",
+    "connect": "offer",
+    "start": "offer",
+    "negotiate": "offer",
+    "open_session": "offer",
+    "status": "status",
+    "get_status": "status",
+    "state": "status",
+    "health": "status",
+    "close": "close_session",
+    "disconnect": "close_session",
+    "stop": "close_session",
+    "terminate": "close_session",
+    "end": "close_session",
+    "close_session": "close_session",
+    "delete_session": "close_session",
+    "ping": "ping",
+    "heartbeat": "ping",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ClassifiedCommand:
+  command: str
+  raw_command: str | None
+  arguments: dict[str, Any]
+
+
+class CommandClassifier:
+
+  def classify(self, payload: Mapping[str, Any]) -> ClassifiedCommand:
+    raw_command = self._extract_raw_command(payload)
+    canonical = self._canonicalize(raw_command)
+
+    if canonical == "unknown" and self._looks_like_offer_payload(payload):
+      canonical = "offer"
+
+    arguments = self._extract_arguments(payload, raw_command)
+    return ClassifiedCommand(
+        command=canonical,
+        raw_command=raw_command,
+        arguments=arguments,
+    )
+
+  def _extract_raw_command(self, payload: Mapping[str, Any]) -> str | None:
+    for key in _COMMAND_KEYS:
+      value = payload.get(key)
+      if isinstance(value, str) and value.strip():
+        return value
+
+    for key, value in payload.items():
+      normalized_key = self._normalize_token(key)
+      if normalized_key in _COMMAND_ALIASES:
+        return key
+      if isinstance(value, Mapping):
+        nested_command = self._extract_raw_command(value)
+        if nested_command:
+          return nested_command
+
+    return None
+
+  def _extract_arguments(self, payload: Mapping[str, Any],
+                         raw_command: str | None) -> dict[str, Any]:
+    arguments: dict[str, Any] = {}
+
+    for key in _PAYLOAD_KEYS:
+      value = payload.get(key)
+      if isinstance(value, Mapping):
+        arguments.update(value)
+
+    if raw_command:
+      command_key = next(
+          (key for key in payload if self._normalize_token(key) == self._normalize_token(raw_command)),
+          None,
+      )
+      if command_key:
+        command_value = payload.get(command_key)
+        if isinstance(command_value, Mapping):
+          arguments.update(command_value)
+
+    for key, value in payload.items():
+      normalized = self._normalize_token(key)
+      if normalized in _COMMAND_KEYS or normalized in _PAYLOAD_KEYS:
+        continue
+      arguments.setdefault(key, value)
+
+    return arguments
+
+  def _canonicalize(self, raw_command: str | None) -> str:
+    if raw_command is None:
+      return "unknown"
+    normalized = self._normalize_token(raw_command)
+    return _COMMAND_ALIASES.get(normalized, "unknown")
+
+  def _normalize_token(self, raw: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", raw.strip().lower())
+    return normalized.strip("_")
+
+  def _looks_like_offer_payload(self, payload: Mapping[str, Any]) -> bool:
+    sdp = payload.get("sdp")
+    kind = payload.get("type")
+    if isinstance(sdp, str) and sdp.strip() and isinstance(kind, str) and kind == "offer":
+      return True
+
+    for key in _PAYLOAD_KEYS:
+      nested = payload.get(key)
+      if isinstance(nested, Mapping):
+        nested_sdp = nested.get("sdp")
+        nested_type = nested.get("type")
+        if isinstance(nested_sdp, str) and nested_sdp.strip() and isinstance(nested_type, str) and nested_type == "offer":
+          return True
+
+    return False
