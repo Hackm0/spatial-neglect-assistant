@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 import time
 from dataclasses import dataclass
+from typing import Generator
 
 import pytest
 
@@ -11,6 +12,7 @@ from mobile_ingestion.analyzer import (AnalyzerMetrics, AnalyzerPort,
                                        VideoFrameEnvelope)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto, SessionOfferRequestDto
+from mobile_ingestion.mode_manager import RuntimeModeStatus
 from mobile_ingestion.object_search import ObjectSearchStatus
 from mobile_ingestion.runtime import AsyncioRunner
 from mobile_ingestion.session_manager import (SessionBusyError,
@@ -174,6 +176,67 @@ class RecordingObjectSearch:
     )
 
 
+class RecordingRuntimeMode:
+
+  def __init__(self) -> None:
+    self.started_sessions: list[str] = []
+    self.stopped_sessions: list[str] = []
+    self.status = RuntimeModeStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        mode="idle",
+        detail="Mode idle.",
+        error=None,
+    )
+
+  def start_session(self, session_id: str) -> None:
+    self.started_sessions.append(session_id)
+    self.status = RuntimeModeStatus(
+        available=True,
+        active=True,
+        session_id=session_id,
+        mode="idle",
+        detail="Mode idle.",
+        error=None,
+    )
+
+  def submit_frame(self, frame: object) -> None:
+    del frame
+
+  def stop_session(self, session_id: str) -> None:
+    self.stopped_sessions.append(session_id)
+    if self.status.session_id == session_id:
+      self.status = RuntimeModeStatus(
+          available=True,
+          active=False,
+          session_id=None,
+          mode="idle",
+          detail="Mode idle.",
+          error=None,
+      )
+
+  def snapshot(self) -> RuntimeModeStatus:
+    return self.status
+
+  def subscribe(self) -> object:
+    raise NotImplementedError
+
+  def unsubscribe(self, subscription: object) -> None:
+    del subscription
+    raise NotImplementedError
+
+  def shutdown(self) -> None:
+    self.status = RuntimeModeStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        mode="idle",
+        detail="Mode idle.",
+        error=None,
+    )
+
+
 @dataclass
 class FakePeerSession:
   context: SessionContext
@@ -227,18 +290,20 @@ class FakePeerSession:
 
 @pytest.fixture
 def manager(
-) -> tuple[SessionManager, RecordingAnalyzer, RecordingVoiceProcessor,
-           RecordingObjectSearch]:
+) -> Generator[tuple[SessionManager, RecordingAnalyzer, RecordingVoiceProcessor,
+                     RecordingObjectSearch, RecordingRuntimeMode], None, None]:
   runtime = AsyncioRunner()
   analyzer = RecordingAnalyzer()
   voice_processor = RecordingVoiceProcessor()
   object_search = RecordingObjectSearch()
+  runtime_mode = RecordingRuntimeMode()
   settings = AppConfig(testing=True)
   session_manager = SessionManager(
       runtime=runtime,
       analyzer=analyzer,
       voice_processor=voice_processor,
       object_search=object_search,
+      runtime_mode=runtime_mode,
       settings=settings,
       session_factory=lambda context, callbacks: FakePeerSession(
           context=context,
@@ -246,7 +311,7 @@ def manager(
       ),
   )
   try:
-    yield session_manager, analyzer, voice_processor, object_search
+    yield session_manager, analyzer, voice_processor, object_search, runtime_mode
   finally:
     session_manager.shutdown()
 
@@ -261,7 +326,7 @@ def wait_until(predicate, timeout_seconds: float = 2.0) -> None:
 
 
 def test_session_manager_accepts_sender_offer_and_updates_status(manager) -> None:
-  session_manager, analyzer, voice_processor, object_search = manager
+  session_manager, analyzer, voice_processor, object_search, runtime_mode = manager
 
   answer = session_manager.accept_offer(
       SessionOfferRequestDto(sdp="offer-sdp", type="offer", role="sender"))
@@ -280,10 +345,11 @@ def test_session_manager_accepts_sender_offer_and_updates_status(manager) -> Non
   assert analyzer.snapshot().audio_frames == 1
   assert len(voice_processor.started_sessions) == 1
   assert len(object_search.started_sessions) == 1
+  assert len(runtime_mode.started_sessions) == 1
 
 
 def test_session_manager_rejects_second_sender_session(manager) -> None:
-  session_manager, _, _, _ = manager
+  session_manager, _, _, _, _ = manager
 
   session_manager.accept_offer(
       SessionOfferRequestDto(sdp="offer-sdp", type="offer", role="sender"))
@@ -294,7 +360,7 @@ def test_session_manager_rejects_second_sender_session(manager) -> None:
 
 
 def test_session_manager_rejects_spectator_without_sender_video(manager) -> None:
-  session_manager, _, _, _ = manager
+  session_manager, _, _, _, _ = manager
 
   with pytest.raises(SessionUnavailableError):
     session_manager.accept_offer(
@@ -306,7 +372,7 @@ def test_session_manager_rejects_spectator_without_sender_video(manager) -> None
 
 
 def test_session_manager_accepts_spectator_after_sender(manager) -> None:
-  session_manager, _, _, _ = manager
+  session_manager, _, _, _, _ = manager
 
   session_manager.accept_offer(
       SessionOfferRequestDto(sdp="offer-sdp", type="offer", role="sender"))
@@ -325,7 +391,7 @@ def test_session_manager_accepts_spectator_after_sender(manager) -> None:
 
 
 def test_closing_sender_session_closes_spectator_and_resets_room(manager) -> None:
-  session_manager, analyzer, voice_processor, object_search = manager
+  session_manager, analyzer, voice_processor, object_search, runtime_mode = manager
 
   sender_answer = session_manager.accept_offer(
       SessionOfferRequestDto(sdp="offer-sdp", type="offer", role="sender"))
@@ -342,10 +408,11 @@ def test_closing_sender_session_closes_spectator_and_resets_room(manager) -> Non
   assert analyzer.snapshot().sessions_stopped == 1
   assert voice_processor.status.active is False
   assert object_search.status.active is False
+  assert runtime_mode.status.active is False
 
 
 def test_closing_spectator_keeps_sender_running(manager) -> None:
-  session_manager, _, voice_processor, object_search = manager
+  session_manager, _, voice_processor, object_search, runtime_mode = manager
 
   session_manager.accept_offer(
       SessionOfferRequestDto(sdp="offer-sdp", type="offer", role="sender"))
@@ -361,3 +428,4 @@ def test_closing_spectator_keeps_sender_running(manager) -> None:
   assert status.spectator_occupied is False
   assert voice_processor.status.active is True
   assert object_search.status.active is True
+  assert runtime_mode.status.active is True

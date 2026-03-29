@@ -5,8 +5,9 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from mobile_ingestion.analyzer import AnalyzerMetrics
-from mobile_ingestion.object_search import ObjectSearchStatus
 from mobile_ingestion.arduino import ArduinoSnapshot
+from mobile_ingestion.mode_manager import RuntimeModeStatus
+from mobile_ingestion.object_search import ObjectSearchStatus
 from mobile_ingestion.voice import TranscriptEntry, VoiceStatus, WakeWordEvent
 from uart_protocol import ActuatorCommand, RawFrameEvent, TelemetrySnapshot
 
@@ -453,6 +454,53 @@ class ObjectSearchStatusDto:
         "modelState": self.model_state,
         "modelDetail": self.model_detail,
         "selectedVisionModel": self.selected_vision_model,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeModeStatusDto:
+  available: bool
+  active: bool
+  session_id: str | None
+  mode: str
+  detail: str | None
+  error: str | None
+  plate_visible: bool | None
+  is_eating: bool | None
+  one_side_food_remaining: bool | None
+  remaining_side: str | None
+  last_updated_at: str | None
+
+  @classmethod
+  def from_status(cls, status: RuntimeModeStatus) -> "RuntimeModeStatusDto":
+    return cls(
+        available=status.available,
+        active=status.active,
+        session_id=status.session_id,
+        mode=status.mode,
+        detail=status.detail,
+        error=status.error,
+        plate_visible=status.plate_visible,
+        is_eating=status.is_eating,
+        one_side_food_remaining=status.one_side_food_remaining,
+        remaining_side=status.remaining_side,
+        last_updated_at=(status.last_updated_at.isoformat()
+                         if status.last_updated_at is not None else None),
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "available": self.available,
+        "active": self.active,
+        "sessionId": self.session_id,
+        "mode": self.mode,
+        "detail": self.detail,
+        "error": self.error,
+        "plateVisible": self.plate_visible,
+        "isEating": self.is_eating,
+        "oneSideFoodRemaining": self.one_side_food_remaining,
+        "remainingSide": self.remaining_side,
+        "lastUpdatedAt": self.last_updated_at,
     }
 
 

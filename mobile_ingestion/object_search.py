@@ -333,6 +333,9 @@ class ObjectSearchPort(Protocol):
   def set_selected_vision_model(self, model: str) -> ObjectSearchStatus:
     raise NotImplementedError
 
+  def cancel_active_search(self, session_id: str) -> ObjectSearchStatus:
+    raise NotImplementedError
+
   def subscribe(self) -> ObjectSearchSubscription:
     raise NotImplementedError
 
@@ -1116,6 +1119,28 @@ class ObjectSearchCoordinator(ObjectSearchPort):
     if active_session_id is not None and not runtime_status.model_ready:
       self._ensure_detector_prepare_started(active_session_id)
     self._broadcast_status()
+    return self.snapshot()
+
+  def cancel_active_search(self, session_id: str) -> ObjectSearchStatus:
+    changed = False
+    with self._lock:
+      if session_id != self._active_session_id:
+        return self._status_with_detector_runtime(self._status)
+      self._awaiting_request_until = None
+      self._target_detector_labels = tuple()
+      changed = self._replace_status_locked(
+          available=True,
+          active=True,
+          session_id=session_id,
+          state="idle",
+          target_label=None,
+          detected=False,
+          last_detected_at=None,
+          error=None,
+      )
+    if changed:
+      self._feedback.clear(session_id)
+      self._broadcast_status()
     return self.snapshot()
 
   def subscribe(self) -> ObjectSearchSubscription:

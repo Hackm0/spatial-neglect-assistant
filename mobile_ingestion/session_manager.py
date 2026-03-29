@@ -14,6 +14,7 @@ from mobile_ingestion.dto import (RoomStatusDto, SessionDescriptionDto,
                                   SessionOfferRequestDto,
                                   SessionOfferResponseDto,
                                   SessionSlotStatusDto)
+from mobile_ingestion.mode_manager import RuntimeModePort
 from mobile_ingestion.object_search import ObjectSearchPort
 from mobile_ingestion.runtime import AsyncioRunner
 from mobile_ingestion.voice import VoiceProcessingPort
@@ -49,6 +50,7 @@ class SessionContext:
   analyzer: AnalyzerPort
   voice_processor: VoiceProcessingPort
   object_search: ObjectSearchPort
+  runtime_mode: RuntimeModePort
   settings: AppConfig
 
 
@@ -92,12 +94,14 @@ class SessionManager:
 
   def __init__(self, *, runtime: AsyncioRunner, analyzer: AnalyzerPort,
                voice_processor: VoiceProcessingPort,
-               object_search: ObjectSearchPort, settings: AppConfig,
+               object_search: ObjectSearchPort,
+               runtime_mode: RuntimeModePort, settings: AppConfig,
                session_factory: PeerSessionFactory) -> None:
     self._runtime = runtime
     self._analyzer = analyzer
     self._voice_processor = voice_processor
     self._object_search = object_search
+    self._runtime_mode = runtime_mode
     self._settings = settings
     self._session_factory = session_factory
     self._lock = Lock()
@@ -189,6 +193,7 @@ class SessionManager:
           analyzer=self._analyzer,
           voice_processor=self._voice_processor,
           object_search=self._object_search,
+            runtime_mode=self._runtime_mode,
           settings=self._settings,
       )
       callbacks = self._build_callbacks(role)
@@ -206,8 +211,10 @@ class SessionManager:
       try:
         self._voice_processor.start_session(context.session_id)
         self._object_search.start_session(context.session_id)
+        self._runtime_mode.start_session(context.session_id)
       except Exception:
         self._clear_managed_session(role, expected_token=managed_session.token)
+        self._runtime_mode.stop_session(context.session_id)
         self._object_search.stop_session(context.session_id)
         self._voice_processor.stop_session(context.session_id)
         self._safe_close(managed_session.session)
@@ -289,6 +296,7 @@ class SessionManager:
 
     if stopped_sender_session_id is not None:
       self._object_search.stop_session(stopped_sender_session_id)
+      self._runtime_mode.stop_session(stopped_sender_session_id)
       self._voice_processor.stop_session(stopped_sender_session_id)
     if spectator_to_close is not None:
       self._safe_close(spectator_to_close)

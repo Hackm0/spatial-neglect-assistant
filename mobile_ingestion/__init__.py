@@ -7,6 +7,7 @@ from flask import Flask
 
 from mobile_ingestion.blueprints.arduino import arduino_blueprint
 from mobile_ingestion.blueprints.api import api_blueprint
+from mobile_ingestion.blueprints.mode import mode_blueprint
 from mobile_ingestion.blueprints.object_search import object_search_blueprint
 from mobile_ingestion.blueprints.ui import ui_blueprint
 from mobile_ingestion.blueprints.voice import voice_blueprint
@@ -30,6 +31,7 @@ def create_app(config: Mapping[str, Any] | AppConfig | None = None,
   app.register_blueprint(arduino_blueprint)
   app.register_blueprint(voice_blueprint)
   app.register_blueprint(object_search_blueprint)
+  app.register_blueprint(mode_blueprint)
 
   @app.get("/health")
   def health() -> tuple[dict[str, str], int]:

@@ -122,11 +122,21 @@ class AppConfig:
   object_search_detection_interval_seconds: float = 1.0
   object_search_command_timeout_seconds: float = 8.0
   object_search_resolver_model: str = "gpt-4o-mini"
+  mode_idle_check_interval_seconds: float = 15.0
+  mode_eating_check_interval_seconds: float = 5.0
+  mode_eating_streak_required: int = 2
+  mode_eating_vibration_seconds: float = 3.0
+  mode_eating_vibration_cooldown_seconds: float = 5.0
+  mode_object_search_completion_seconds: float = 3.0
+  mode_eating_vision_model: str = "gpt-5.4-mini"
 
   def __post_init__(self) -> None:
     normalized_model = normalize_object_search_vision_model(
         self.object_search_vision_model)
     object.__setattr__(self, "object_search_vision_model", normalized_model)
+    normalized_mode_model = normalize_object_search_vision_model(
+      self.mode_eating_vision_model)
+    object.__setattr__(self, "mode_eating_vision_model", normalized_mode_model)
 
   @classmethod
   def from_mapping(cls,
@@ -187,6 +197,28 @@ class AppConfig:
             "MOBILE_INGEST_OBJECT_SEARCH_RESOLVER_MODEL",
             defaults.object_search_resolver_model,
         ),
+        "mode_idle_check_interval_seconds": float(
+          os.getenv("MOBILE_INGEST_MODE_IDLE_CHECK_INTERVAL_SECONDS",
+                defaults.mode_idle_check_interval_seconds)),
+        "mode_eating_check_interval_seconds": float(
+          os.getenv("MOBILE_INGEST_MODE_EATING_CHECK_INTERVAL_SECONDS",
+                defaults.mode_eating_check_interval_seconds)),
+        "mode_eating_streak_required": int(
+          os.getenv("MOBILE_INGEST_MODE_EATING_STREAK_REQUIRED",
+                defaults.mode_eating_streak_required)),
+        "mode_eating_vibration_seconds": float(
+          os.getenv("MOBILE_INGEST_MODE_EATING_VIBRATION_SECONDS",
+                defaults.mode_eating_vibration_seconds)),
+        "mode_eating_vibration_cooldown_seconds": float(
+          os.getenv("MOBILE_INGEST_MODE_EATING_VIBRATION_COOLDOWN_SECONDS",
+                defaults.mode_eating_vibration_cooldown_seconds)),
+        "mode_object_search_completion_seconds": float(
+          os.getenv("MOBILE_INGEST_MODE_OBJECT_SEARCH_COMPLETION_SECONDS",
+                defaults.mode_object_search_completion_seconds)),
+        "mode_eating_vision_model": os.getenv(
+          "MOBILE_INGEST_MODE_EATING_VISION_MODEL",
+          defaults.mode_eating_vision_model,
+        ),
     }
     if overrides:
       for key, value in overrides.items():
@@ -205,7 +237,11 @@ class AppConfig:
           )
         elif normalized_key in {"debug", "testing"}:
           values[normalized_key] = _parse_bool(value, values[normalized_key])
-        elif normalized_key in {"port", "voice_transcript_buffer_size"}:
+        elif normalized_key in {
+            "port",
+            "voice_transcript_buffer_size",
+            "mode_eating_streak_required",
+        }:
           values[normalized_key] = int(value)
         elif normalized_key in {
             "video_max_fps",
@@ -215,6 +251,11 @@ class AppConfig:
             "voice_wake_cooldown_seconds",
             "object_search_detection_interval_seconds",
             "object_search_command_timeout_seconds",
+            "mode_idle_check_interval_seconds",
+            "mode_eating_check_interval_seconds",
+            "mode_eating_vibration_seconds",
+            "mode_eating_vibration_cooldown_seconds",
+            "mode_object_search_completion_seconds",
         }:
           values[normalized_key] = float(value)
         elif normalized_key in values:

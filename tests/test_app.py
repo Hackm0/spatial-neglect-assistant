@@ -12,6 +12,8 @@ from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoEvent,
                                       ArduinoSnapshot, ArduinoSubscription)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionOfferRequestDto, SessionOfferResponseDto
+from mobile_ingestion.mode_manager import (RuntimeModeEvent, RuntimeModeStatus,
+                                           RuntimeModeSubscription)
 from mobile_ingestion.object_search import (ObjectSearchEvent,
                                             ObjectSearchStatus,
                                             ObjectSearchSubscription)
@@ -397,6 +399,55 @@ class FakeObjectSearch:
   def shutdown(self) -> None:
     self.status = replace(self.status, active=False, session_id=None)
 
+  def cancel_active_search(self, session_id: str) -> ObjectSearchStatus:
+    if self.status.session_id == session_id:
+      self.status = replace(
+          self.status,
+          state="idle",
+          detected=False,
+          target_label=None,
+          last_detected_at=None,
+      )
+    return self.status
+
+
+class FakeRuntimeMode:
+
+  def __init__(self) -> None:
+    self.status = RuntimeModeStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        mode="idle",
+        detail="Mode idle.",
+        error=None,
+    )
+    self.events: "queue.Queue[RuntimeModeEvent | None]" = queue.Queue()
+    self.events.put(RuntimeModeEvent("status", self.status))
+    self.events.put(None)
+
+  def start_session(self, session_id: str) -> None:
+    self.status = replace(self.status, active=True, session_id=session_id)
+
+  def stop_session(self, session_id: str) -> None:
+    if self.status.session_id == session_id:
+      self.status = replace(self.status, active=False, session_id=None)
+
+  def submit_frame(self, frame: object) -> None:
+    del frame
+
+  def snapshot(self) -> RuntimeModeStatus:
+    return self.status
+
+  def subscribe(self) -> RuntimeModeSubscription:
+    return RuntimeModeSubscription(1, self.events)
+
+  def unsubscribe(self, subscription: RuntimeModeSubscription) -> None:
+    del subscription
+
+  def shutdown(self) -> None:
+    self.status = replace(self.status, active=False, session_id=None)
+
 
 @pytest.fixture
 def client():
@@ -409,6 +460,7 @@ def client():
       arduino_controller=FakeArduinoController(),
       voice_processor=FakeVoiceProcessor(),
       object_search=FakeObjectSearch(),
+        runtime_mode=FakeRuntimeMode(),
   )
   app = create_app(settings, services=services)
   app.config.update(TESTING=True)
@@ -425,6 +477,7 @@ def test_index_renders(client) -> None:
   assert "Debug Arduino" in body
   assert "Voice debug" in body
   assert "Recherche d'objet" in body
+  assert "Mode actif" in body
   assert "Modèle vision" in body
   assert "objectSearchVisionModels" in body
   assert "videoMaxFps" in body
@@ -733,3 +786,21 @@ def test_object_search_events_route_streams_sse(client) -> None:
   assert b"event: status" in body
   assert "targetLabel".encode("utf-8") in body
   assert b"modelReady" in body
+
+
+def test_mode_status_route_returns_json(client) -> None:
+  response = client.get("/api/mode/status")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["available"] is True
+  assert payload["mode"] == "idle"
+
+
+def test_mode_events_route_streams_sse(client) -> None:
+  response = client.get("/api/mode/events")
+  body = b"".join(response.response)
+
+  assert response.status_code == 200
+  assert b"event: status" in body
+  assert b"\"mode\": \"idle\"" in body

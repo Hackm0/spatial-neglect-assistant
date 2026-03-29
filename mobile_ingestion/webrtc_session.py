@@ -175,6 +175,7 @@ class WebRtcPeerSession(PeerSessionPort):
             frame, envelope.received_at)
         if search_frame is not None:
           self._context.object_search.submit_frame(search_frame)
+          self._context.runtime_mode.submit_frame(search_frame)
     except (asyncio.CancelledError, MediaStreamError):
       return
 

@@ -10,6 +10,8 @@ const VOICE_STATUS_POLL_INTERVAL_MS = 2000;
 const VOICE_EVENT_RECONNECT_DELAY_MS = 1500;
 const OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS = 2000;
 const OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS = 1500;
+const MODE_STATUS_POLL_INTERVAL_MS = 2000;
+const MODE_EVENT_RECONNECT_DELAY_MS = 1500;
 
 const elements = {
   connectButton: document.getElementById("connect-button"),
@@ -19,6 +21,8 @@ const elements = {
   preview: document.getElementById("local-preview"),
   statusBadge: document.getElementById("status-badge"),
   statusDetail: document.getElementById("status-detail"),
+  activeModeBadge: document.getElementById("active-mode-badge"),
+  activeModeDetail: document.getElementById("active-mode-detail"),
   voiceDebugToggleButton: document.getElementById("voice-debug-toggle-button"),
   voiceDebugPanel: document.getElementById("voice-debug-panel"),
   voiceDebugBadge: document.getElementById("voice-debug-badge"),
@@ -108,6 +112,12 @@ const state = {
     reconnectTimeout: null,
     status: null,
     modelUpdateInFlight: false,
+  },
+  mode: {
+    eventSource: null,
+    statusInterval: null,
+    reconnectTimeout: null,
+    status: null,
   },
   arduino: {
     debugVisible: false,
@@ -667,6 +677,98 @@ function resetObjectSearchState() {
   clearObjectSearchModelUpdateStatus();
   updateProtectedControls();
   clearObjectSearchError();
+}
+
+function getModeLabel(mode) {
+  if (mode === "eating") {
+    return "Eating";
+  }
+  if (mode === "object_search") {
+    return "Object Search";
+  }
+  return "Idle";
+}
+
+function applyModeStatus(status) {
+  state.mode.status = status;
+  const mode = status?.mode || "idle";
+  elements.activeModeBadge.textContent = getModeLabel(mode);
+  elements.activeModeBadge.dataset.state = mode;
+  elements.activeModeDetail.textContent = (
+    status?.detail
+    || (mode === "object_search"
+      ? "Recherche d'objet en cours."
+      : (mode === "eating" ? "Mode repas actif." : "Mode idle."))
+  );
+}
+
+async function fetchModeStatus() {
+  const payload = await requestJson("/api/mode/status");
+  applyModeStatus(payload);
+}
+
+function clearModeReconnectTimer() {
+  if (state.mode.reconnectTimeout !== null) {
+    window.clearTimeout(state.mode.reconnectTimeout);
+    state.mode.reconnectTimeout = null;
+  }
+}
+
+function scheduleModeEventStreamReconnect() {
+  if (state.mode.reconnectTimeout !== null) {
+    return;
+  }
+
+  state.mode.reconnectTimeout = window.setTimeout(() => {
+    state.mode.reconnectTimeout = null;
+    openModeEventStream();
+  }, MODE_EVENT_RECONNECT_DELAY_MS);
+}
+
+function closeModeEventStream() {
+  if (state.mode.eventSource) {
+    state.mode.eventSource.close();
+    state.mode.eventSource = null;
+  }
+}
+
+function openModeEventStream() {
+  closeModeEventStream();
+  const eventSource = new EventSource("/api/mode/events");
+  state.mode.eventSource = eventSource;
+
+  eventSource.addEventListener("status", (event) => {
+    const payload = JSON.parse(event.data);
+    applyModeStatus(payload);
+    clearModeReconnectTimer();
+  });
+
+  eventSource.addEventListener("error", () => {
+    if (state.mode.eventSource !== eventSource) {
+      return;
+    }
+    closeModeEventStream();
+    scheduleModeEventStreamReconnect();
+    fetchModeStatus().catch((error) => {
+      console.error(error);
+    });
+  });
+}
+
+function startModeStatusPolling() {
+  stopModeStatusPolling();
+  state.mode.statusInterval = window.setInterval(() => {
+    fetchModeStatus().catch((error) => {
+      console.error(error);
+    });
+  }, MODE_STATUS_POLL_INTERVAL_MS);
+}
+
+function stopModeStatusPolling() {
+  if (state.mode.statusInterval !== null) {
+    window.clearInterval(state.mode.statusInterval);
+    state.mode.statusInterval = null;
+  }
 }
 
 function renderVoiceTransportDetail() {
@@ -1360,12 +1462,15 @@ async function connect() {
     await Promise.all([
       fetchVoiceStatus(),
       fetchObjectSearchStatus(),
+      fetchModeStatus(),
       fetchStatus(),
     ]);
     startVoiceStatusPolling();
     startObjectSearchStatusPolling();
+    startModeStatusPolling();
     openVoiceEventStream();
     openObjectSearchEventStream();
+    openModeEventStream();
     startStatusPolling();
   } catch (error) {
     console.error(error);
@@ -1387,8 +1492,10 @@ async function disconnect(options = {}) {
   stopStatusPolling();
   stopVoiceStatusPolling();
   stopObjectSearchStatusPolling();
+  stopModeStatusPolling();
   clearVoiceReconnectTimer();
   clearObjectSearchReconnectTimer();
+  clearModeReconnectTimer();
 
   if (state.peerConnection) {
     const peerConnection = state.peerConnection;
@@ -1432,6 +1539,12 @@ async function disconnect(options = {}) {
   resetVoiceState();
   closeObjectSearchEventStream();
   resetObjectSearchState();
+  closeModeEventStream();
+  startModeStatusPolling();
+  openModeEventStream();
+  fetchModeStatus().catch((error) => {
+    console.error(error);
+  });
 }
 
 async function fetchArduinoStatus() {
@@ -1741,10 +1854,13 @@ window.addEventListener("beforeunload", () => {
   stopStatusPolling();
   stopVoiceStatusPolling();
   stopObjectSearchStatusPolling();
+  stopModeStatusPolling();
   clearVoiceReconnectTimer();
   clearObjectSearchReconnectTimer();
+  clearModeReconnectTimer();
   closeVoiceEventStream();
   closeObjectSearchEventStream();
+  closeModeEventStream();
   closeArduinoEventStream();
   if (state.peerConnection) {
     state.peerConnection.close();
@@ -1759,6 +1875,7 @@ state.requestedRole = selectedRole();
 renderObjectSearchVisionModelOptions();
 resetVoiceState();
 resetObjectSearchState();
+applyModeStatus({ mode: "idle", detail: "Mode idle." });
 updateArduinoDebugVisibility();
 setArduinoManualControlsEnabled(false);
 applyArduinoTelemetry(null);
@@ -1778,3 +1895,10 @@ fetchObjectSearchStatus().catch(() => {
   elements.objectSearchDetail.textContent =
     "Le statut initial de recherche d'objet n'a pas pu etre lu.";
 });
+
+fetchModeStatus().catch(() => {
+  elements.activeModeDetail.textContent =
+    "Le statut initial du mode actif n'a pas pu etre lu.";
+});
+startModeStatusPolling();
+openModeEventStream();
