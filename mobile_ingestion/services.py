@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from mobile_ingestion.analyzer import AnalyzerPort, NoOpAnalyzer
 from mobile_ingestion.arduino import ArduinoControllerPort, PySerialArduinoController
 from mobile_ingestion.config import AppConfig
+from mobile_ingestion.object_feedback import ArduinoBurstFeedbackController
 from mobile_ingestion.object_search import (ObjectSearchCoordinator,
                                             ObjectSearchPort,
                                             OpenAiObjectTargetResolver,
@@ -40,10 +41,11 @@ def _build_voice_prompt(settings: AppConfig) -> str | None:
   if settings.voice_prompt:
     return settings.voice_prompt
   return (
-      "Transcris uniquement ce qui est entendu, en francais québecois. On te parle toujours en français. "
-      "Ne traduis jamais vers une autre langue. "
-      "Si quelqu'un dit clairement 'ok jarvis' ou 'okay jarvis', conserve-les "
-      "verbatim.")
+            "Transcris mot a mot uniquement ce qui est entendu (francais quebecois). "
+            "N'invente jamais de mots, n'ajoute aucun contexte et ne reformule pas. "
+            "Si l'audio est incomprehensible, retourne une transcription vide. "
+            "Ne traduis jamais vers une autre langue. "
+            "Si quelqu'un dit clairement 'jarvis', conserve-le verbatim.")
 
 
 def build_services(settings: AppConfig) -> ServiceContainer:
@@ -85,6 +87,9 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       target_resolver=OpenAiObjectTargetResolver(
           api_key=os.getenv("OPENAI_API_KEY", ""),
           model=settings.object_search_resolver_model,
+      ),
+      feedback=ArduinoBurstFeedbackController(
+          controller=arduino_controller,
       ),
       wake_phrases=settings.voice_wake_phrases,
       detection_interval_seconds=settings.object_search_detection_interval_seconds,

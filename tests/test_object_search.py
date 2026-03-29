@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 import pytest
 
+from mobile_ingestion.object_feedback import ObjectFeedbackPort
 from mobile_ingestion.object_search import (ObjectDetectionResult,
                                             ObjectDetectorStatus,
                                             ObjectSearchCoordinator,
@@ -115,6 +116,31 @@ class FakeResolver:
       return ObjectTargetResolution(action="unknown")
 
 
+class FakeFeedback(ObjectFeedbackPort):
+
+  def __init__(self) -> None:
+    self.started_sessions: list[str] = []
+    self.stopped_sessions: list[str] = []
+    self.detected_sessions: list[str] = []
+    self.cleared_sessions: list[str] = []
+    self.shutdown_calls = 0
+
+  def start_session(self, session_id: str) -> None:
+    self.started_sessions.append(session_id)
+
+  def stop_session(self, session_id: str) -> None:
+    self.stopped_sessions.append(session_id)
+
+  def notify_target_detected(self, session_id: str) -> None:
+    self.detected_sessions.append(session_id)
+
+  def clear(self, session_id: str) -> None:
+    self.cleared_sessions.append(session_id)
+
+  def shutdown(self) -> None:
+    self.shutdown_calls += 1
+
+
 class FakeUrlOpen:
 
   def __init__(self, response_payload: dict[str, object]) -> None:
@@ -192,7 +218,7 @@ def _final_transcript(text: str, *, session_id: str = "session-one") -> Transcri
 def _wake_event(*, session_id: str = "session-one") -> WakeWordEvent:
   return WakeWordEvent(
       session_id=session_id,
-      phrase="ok jarvis",
+      phrase="jarvis",
       received_at=datetime.now(timezone.utc),
       entry_id=f"wake-{time.monotonic_ns()}",
   )
@@ -204,17 +230,20 @@ class CoordinatorFixture:
   voice: FakeVoiceProcessor
   detector: FakeObjectDetector
   resolver: FakeResolver
+  feedback: FakeFeedback
 
 
 def make_fixture(*, command_timeout_seconds: float = 8.0) -> CoordinatorFixture:
   voice = FakeVoiceProcessor()
   detector = FakeObjectDetector()
   resolver = FakeResolver()
+  feedback = FakeFeedback()
   coordinator = ObjectSearchCoordinator(
       voice_processor=voice,
       object_detector=detector,
       target_resolver=resolver,
-      wake_phrases=("ok jarvis", "okay jarvis"),
+      feedback=feedback,
+      wake_phrases=("jarvis",),
       detection_interval_seconds=0.01,
       command_timeout_seconds=command_timeout_seconds,
   )
@@ -223,6 +252,7 @@ def make_fixture(*, command_timeout_seconds: float = 8.0) -> CoordinatorFixture:
       voice=voice,
       detector=detector,
       resolver=resolver,
+      feedback=feedback,
   )
 
 
@@ -250,6 +280,8 @@ def test_object_search_uses_follow_up_after_wake_word() -> None:
   assert snapshot.target_label == "clés"
   assert snapshot.detected is False
   assert snapshot.selected_vision_model == "gpt-5.4-mini"
+  assert fixture.feedback.started_sessions == ["session-one"]
+  assert fixture.feedback.stopped_sessions == ["session-one"]
   assert fixture.resolver.calls[-1] == "aide moi a trouver mes cles"
 
 
@@ -283,7 +315,7 @@ def test_switching_vision_model_preserves_target_and_resets_search() -> None:
   fixture.voice.emit(
       VoiceEvent(
           "transcript",
-          _final_transcript("ok jarvis trouve ma bouteille d'eau"),
+          _final_transcript("jarvis trouve ma bouteille d'eau"),
       ))
   wait_until(lambda: fixture.coordinator.snapshot().state == "searching")
 
@@ -301,6 +333,42 @@ def test_switching_vision_model_preserves_target_and_resets_search() -> None:
   assert snapshot.last_detected_at is None
   assert snapshot.selected_vision_model == "gpt-5.4"
   assert fixture.detector.set_model_calls == ["gpt-5.4"]
+  assert fixture.feedback.cleared_sessions == ["session-one"]
+
+
+def test_object_search_detection_triggers_feedback_and_cancel_clears_it() -> None:
+  fixture = make_fixture()
+  fixture.resolver.queue_response(
+      ObjectTargetResolution(
+          action="search",
+          display_label_fr="téléphone",
+          detector_labels_en=("phone",),
+      ))
+  fixture.resolver.queue_response(ObjectTargetResolution(action="cancel"))
+
+  fixture.coordinator.start_session("session-one")
+  fixture.voice.emit(
+      VoiceEvent(
+          "transcript",
+          _final_transcript("jarvis trouve mon telephone"),
+      ))
+  wait_until(lambda: fixture.coordinator.snapshot().state == "searching")
+
+  fixture.detector.results.put(
+      ObjectDetectionResult(detected=True, matched_label="phone"))
+  fixture.coordinator.submit_frame(_frame())
+  wait_until(lambda: fixture.coordinator.snapshot().state == "found")
+
+  fixture.voice.emit(
+      VoiceEvent(
+          "transcript",
+          _final_transcript("jarvis arrete"),
+      ))
+  wait_until(lambda: fixture.coordinator.snapshot().state == "idle")
+  fixture.coordinator.stop_session("session-one")
+
+  assert fixture.feedback.detected_sessions == ["session-one"]
+  assert fixture.feedback.cleared_sessions[-1] == "session-one"
 
 
 def test_openai_vision_detector_requires_api_key() -> None:

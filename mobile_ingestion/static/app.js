@@ -378,7 +378,7 @@ function buildObjectSearchDetail(status) {
     return status.error || "La recherche d'objet a rencontré une erreur.";
   }
   if (status.active) {
-    return "Dites « ok jarvis », puis demandez l'objet à trouver.";
+    return "Dites « jarvis », puis demandez l'objet à trouver.";
   }
   return "Connecte le flux mobile pour activer la recherche d'objet.";
 }
@@ -1022,7 +1022,12 @@ async function requestJson(url, options = {}) {
 
 async function requestLocalStream() {
   const preferredConstraints = {
-    audio: true,
+    audio: {
+      channelCount: { ideal: 1 },
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
     video: buildVideoConstraints(),
   };
 
@@ -1037,7 +1042,12 @@ async function requestLocalStream() {
   }
 
   const fallbackStream = await navigator.mediaDevices.getUserMedia({
-    audio: true,
+    audio: {
+      channelCount: { ideal: 1 },
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
     video: {
       frameRate: {
         ideal: getConfiguredVideoMaxFps(),

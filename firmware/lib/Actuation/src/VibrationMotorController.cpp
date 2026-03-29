@@ -1,13 +1,38 @@
 #include "VibrationMotorController.h"
 
+namespace {
+
+constexpr unsigned long kMaxContinuousOnMs = 250UL;
+
+}  // namespace
+
 VibrationMotorController::VibrationMotorController(
     const VibrationMotorConfig& config)
-    : config_(config), enabled_(false), initialized_(false) {}
+    : config_(config),
+      enabled_(false),
+      initialized_(false),
+      requestActive_(false),
+      safetyLatched_(false),
+      startedAtMs_(0UL) {}
 
 void VibrationMotorController::begin() {
   pinMode(config_.pin, OUTPUT);
   initialized_ = true;
+  requestActive_ = false;
+  safetyLatched_ = false;
+  startedAtMs_ = 0UL;
   writeOutput(false);
+}
+
+void VibrationMotorController::update(const unsigned long nowMs) {
+  if (!enabled_ || !requestActive_ || safetyLatched_) {
+    return;
+  }
+
+  if (kMaxContinuousOnMs > 0UL && nowMs - startedAtMs_ >= kMaxContinuousOnMs) {
+    safetyLatched_ = true;
+    writeOutput(false);
+  }
 }
 
 void VibrationMotorController::turnOn() {
@@ -19,11 +44,36 @@ void VibrationMotorController::turnOff() {
 }
 
 void VibrationMotorController::setEnabled(const bool enabled) {
+  if (!enabled) {
+    requestActive_ = false;
+    safetyLatched_ = false;
+    startedAtMs_ = 0UL;
+    if (enabled_ == enabled && initialized_) {
+      return;
+    }
+
+    writeOutput(false);
+    return;
+  }
+
+  if (!requestActive_) {
+    requestActive_ = true;
+    safetyLatched_ = false;
+    startedAtMs_ = millis();
+  }
+
+  if (safetyLatched_) {
+    if (enabled_) {
+      writeOutput(false);
+    }
+    return;
+  }
+
   if (enabled_ == enabled && initialized_) {
     return;
   }
 
-  writeOutput(enabled);
+  writeOutput(true);
 }
 
 bool VibrationMotorController::isEnabled() const {

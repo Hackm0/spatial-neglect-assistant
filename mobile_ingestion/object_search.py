@@ -13,7 +13,8 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
 from mobile_ingestion.config import normalize_object_search_vision_model
-
+from mobile_ingestion.object_feedback import (NoOpObjectFeedback,
+                                              ObjectFeedbackPort)
 from mobile_ingestion.voice import (TranscriptEntry, VoiceEvent,
                                     VoiceProcessingPort, VoiceSubscription,
                                     WakeWordEvent, normalize_transcript_text)
@@ -912,6 +913,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
       voice_processor: VoiceProcessingPort,
       object_detector: ObjectDetectorPort,
       target_resolver: ObjectTargetResolverPort,
+      feedback: ObjectFeedbackPort | None = None,
       wake_phrases: tuple[str, ...],
       detection_interval_seconds: float,
       command_timeout_seconds: float,
@@ -919,6 +921,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
     self._voice_processor = voice_processor
     self._object_detector = object_detector
     self._target_resolver = target_resolver
+    self._feedback = feedback or NoOpObjectFeedback()
     self._wake_phrase_tokens = tuple(
         phrase_tokens
         for phrase_tokens in (
@@ -1011,6 +1014,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
 
     voice_thread.start()
     detection_thread.start()
+    self._feedback.start_session(session_id)
     self._ensure_detector_prepare_started(session_id)
     self._broadcast_status()
 
@@ -1066,6 +1070,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
       detection_thread.join(timeout=2.0)
     if voice_subscription is not None:
       self._voice_processor.unsubscribe(voice_subscription)
+    self._feedback.stop_session(session_id)
 
     self._broadcast_status()
 
@@ -1110,6 +1115,8 @@ class ObjectSearchCoordinator(ObjectSearchPort):
         )
     if active_session_id is not None and not runtime_status.model_ready:
       self._ensure_detector_prepare_started(active_session_id)
+    if active_session_id is not None:
+      self._feedback.clear(active_session_id)
     self._broadcast_status()
     return self.snapshot()
 
@@ -1135,6 +1142,8 @@ class ObjectSearchCoordinator(ObjectSearchPort):
 
     if session_id is not None:
       self.stop_session(session_id)
+
+    self._feedback.shutdown()
 
     with self._lock:
       subscriptions = tuple(self._subscriptions.values())
@@ -1358,6 +1367,8 @@ class ObjectSearchCoordinator(ObjectSearchPort):
             error=None,
         )
     if changed:
+      if resolution.action in {"cancel", "search"}:
+        self._feedback.clear(session_id)
       self._broadcast_status()
 
   def _apply_detection_result(self, session_id: str,
@@ -1392,6 +1403,8 @@ class ObjectSearchCoordinator(ObjectSearchPort):
             error=None,
         )
     if changed:
+      if detection.detected:
+        self._feedback.notify_target_detected(session_id)
       self._broadcast_status()
 
   def _expire_request_window(self, session_id: str) -> None:
@@ -1436,6 +1449,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
           error=message,
       )
     if changed:
+      self._feedback.clear(session_id)
       self._broadcast_status()
 
   def _replace_status_locked(self, **changes: object) -> bool:

@@ -116,7 +116,7 @@ class AppConfig:
   voice_realtime_url: str = "wss://api.openai.com/v1/realtime?intent=transcription"
   voice_transcript_buffer_size: int = 50
   voice_audio_buffer_seconds: float = 20.0
-  voice_wake_phrases: tuple[str, ...] = ("okay jarvis", "ok jarvis")
+  voice_wake_phrases: tuple[str, ...] = ("jarvis",)
   voice_wake_cooldown_seconds: float = 3.0
   object_search_vision_model: str = "gpt-5.4-mini"
   object_search_detection_interval_seconds: float = 1.0

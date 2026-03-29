@@ -8,6 +8,7 @@ namespace {
 
 constexpr float kMinimumNormalizedInput = -1.0F;
 constexpr float kMaximumNormalizedInput = 1.0F;
+constexpr unsigned long kMaxContinuousVibrationOnMs = 250UL;
 
 float clampFloat(const float value, const float minimum, const float maximum) {
   if (value < minimum) {
@@ -86,7 +87,8 @@ FirmwareApplication::FirmwareApplication(const FirmwareApplicationConfig& config
       accelerometerRetryInterval_(config_.accelerometerRetryIntervalMs),
       transportLock_(config_.protocolConfig.commandTimeoutMs),
       commandSupervisor_(config_.servoConfig.initialAngle,
-                         config_.protocolConfig.commandTimeoutMs),
+                         config_.protocolConfig.commandTimeoutMs,
+                         kMaxContinuousVibrationOnMs),
       latestSnapshot_() {}
 
 bool FirmwareApplication::begin() {
@@ -136,6 +138,7 @@ void FirmwareApplication::update(const unsigned long nowMs) {
   }
 
   applyActuatorCommand(commandSupervisor_.currentCommand(nowMs));
+  vibrationMotor_.update(nowMs);
   servoMotor_.update(nowMs);
 
   if (distanceSensor_.update()) {

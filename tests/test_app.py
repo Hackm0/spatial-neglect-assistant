@@ -175,8 +175,14 @@ class FakeArduinoController:
     return self.snapshot
 
   def set_backend_command(self, command: ActuatorCommand) -> None:
-    effective_command = (command if not self.snapshot.debug_enabled
-                         else self.snapshot.debug_command)
+    if self.snapshot.debug_enabled:
+      effective_command = ActuatorCommand(
+          servo_angle_degrees=self.snapshot.debug_command.servo_angle_degrees,
+          vibration_enabled=(self.snapshot.debug_command.vibration_enabled
+                             or command.vibration_enabled),
+      )
+    else:
+      effective_command = command
     self.snapshot = replace(
         self.snapshot,
         backend_command=command,
@@ -184,8 +190,14 @@ class FakeArduinoController:
     )
 
   def set_debug_enabled(self, enabled: bool) -> None:
-    effective_command = (self.snapshot.debug_command
-                         if enabled else self.snapshot.backend_command)
+    if enabled:
+      effective_command = ActuatorCommand(
+          servo_angle_degrees=self.snapshot.debug_command.servo_angle_degrees,
+          vibration_enabled=(self.snapshot.debug_command.vibration_enabled
+                             or self.snapshot.backend_command.vibration_enabled),
+      )
+    else:
+      effective_command = self.snapshot.backend_command
     self.snapshot = replace(
         self.snapshot,
         debug_enabled=enabled,
@@ -493,6 +505,57 @@ def test_arduino_command_route_updates_backend_command(client) -> None:
   }
   assert payload["effectiveCommand"] == {
       "servoAngleDegrees": 45.0,
+      "vibrationEnabled": True,
+  }
+
+def test_arduino_backend_vibration_affects_effective_command_when_debug_enabled(
+    client) -> None:
+  debug_response = client.put("/api/arduino/debug", json={"enabled": True})
+  assert debug_response.status_code == 200
+
+  debug_command_response = client.put(
+      "/api/arduino/debug/command",
+      json={
+          "servoAngleDegrees": 15.0,
+          "vibrationEnabled": False,
+      },
+  )
+  assert debug_command_response.status_code == 409
+
+  connect_response = client.post("/api/arduino/connection",
+                                 json={"port": "/dev/ttyUSB0"})
+  assert connect_response.status_code == 200
+
+  debug_command_response = client.put(
+      "/api/arduino/debug/command",
+      json={
+          "servoAngleDegrees": 15.0,
+          "vibrationEnabled": False,
+      },
+  )
+  assert debug_command_response.status_code == 200
+
+  backend_command_response = client.put(
+      "/api/arduino/command",
+      json={
+          "servoAngleDegrees": 120.0,
+          "vibrationEnabled": True,
+      },
+  )
+
+  assert backend_command_response.status_code == 200
+  payload = backend_command_response.get_json()
+  assert payload["debugEnabled"] is True
+  assert payload["debugCommand"] == {
+      "servoAngleDegrees": 15.0,
+      "vibrationEnabled": False,
+  }
+  assert payload["backendCommand"] == {
+      "servoAngleDegrees": 120.0,
+      "vibrationEnabled": True,
+  }
+  assert payload["effectiveCommand"] == {
+      "servoAngleDegrees": 15.0,
       "vibrationEnabled": True,
   }
 
