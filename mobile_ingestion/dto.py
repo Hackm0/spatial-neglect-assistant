@@ -10,6 +10,17 @@ from mobile_ingestion.arduino import ArduinoSnapshot
 from mobile_ingestion.voice import TranscriptEntry, VoiceStatus, WakeWordEvent
 from uart_protocol import ActuatorCommand, RawFrameEvent, TelemetrySnapshot
 
+SESSION_ROLES = ("sender", "spectator")
+
+
+def normalize_session_role(value: Any) -> str:
+  normalized = str(value).strip().lower()
+  if normalized not in SESSION_ROLES:
+    supported = ", ".join(SESSION_ROLES)
+    raise ValueError(
+        f"Field 'role' must be one of: {supported}.")
+  return normalized
+
 
 @dataclass(frozen=True, slots=True)
 class SessionDescriptionDto:
@@ -35,21 +46,76 @@ class SessionDescriptionDto:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionStatusDto:
+class SessionOfferRequestDto:
+  sdp: str
+  type: str
+  role: str
+
+  @classmethod
+  def from_mapping(cls,
+                   payload: Mapping[str, Any]) -> "SessionOfferRequestDto":
+    description = SessionDescriptionDto.from_mapping(payload)
+    return cls(
+        sdp=description.sdp,
+        type=description.type,
+        role=normalize_session_role(payload.get("role")),
+    )
+
+  def to_description(self) -> SessionDescriptionDto:
+    return SessionDescriptionDto(
+        sdp=self.sdp,
+        type=self.type,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOfferResponseDto:
+  sdp: str
+  type: str
+  role: str
+  session_token: str
+
+  @classmethod
+  def from_description(
+      cls,
+      description: SessionDescriptionDto,
+      *,
+      role: str,
+      session_token: str,
+  ) -> "SessionOfferResponseDto":
+    return cls(
+        sdp=description.sdp,
+        type=description.type,
+        role=role,
+        session_token=session_token,
+    )
+
+  def to_dict(self) -> dict[str, str]:
+    return {
+        "sdp": self.sdp,
+        "type": self.type,
+        "role": self.role,
+        "sessionToken": self.session_token,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSlotStatusDto:
   state: str
   active: bool
+  role: str
   session_id: str | None
   connection_state: str
   has_video_track: bool
   has_audio_track: bool
   started_at: str | None
   error: str | None
-  analyzer_metrics: AnalyzerMetrics
 
   @classmethod
   def from_values(
       cls,
       *,
+      role: str,
       state: str,
       active: bool,
       session_id: str | None,
@@ -58,9 +124,9 @@ class SessionStatusDto:
       has_audio_track: bool,
       started_at: datetime | None,
       error: str | None,
-      analyzer_metrics: AnalyzerMetrics,
-  ) -> "SessionStatusDto":
+  ) -> "SessionSlotStatusDto":
     return cls(
+        role=role,
         state=state,
         active=active,
         session_id=session_id,
@@ -69,11 +135,11 @@ class SessionStatusDto:
         has_audio_track=has_audio_track,
         started_at=started_at.isoformat() if started_at else None,
         error=error,
-        analyzer_metrics=analyzer_metrics,
     )
 
   def to_dict(self) -> dict[str, Any]:
     return {
+        "role": self.role,
         "state": self.state,
         "active": self.active,
         "sessionId": self.session_id,
@@ -82,6 +148,28 @@ class SessionStatusDto:
         "hasAudioTrack": self.has_audio_track,
         "startedAt": self.started_at,
         "error": self.error,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RoomStatusDto:
+  room_state: str
+  sender_occupied: bool
+  spectator_occupied: bool
+  sender_video_available: bool
+  sender: SessionSlotStatusDto | None
+  spectator: SessionSlotStatusDto | None
+  analyzer_metrics: AnalyzerMetrics
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+        "roomState": self.room_state,
+        "senderOccupied": self.sender_occupied,
+        "spectatorOccupied": self.spectator_occupied,
+        "senderVideoAvailable": self.sender_video_available,
+        "sender": self.sender.to_dict() if self.sender is not None else None,
+        "spectator": (self.spectator.to_dict()
+                       if self.spectator is not None else None),
         "analyzerMetrics": self.analyzer_metrics.to_dict(),
     }
 

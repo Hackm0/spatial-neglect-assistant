@@ -9,6 +9,9 @@ from flask import (Blueprint, Response, current_app, jsonify, request,
 from mobile_ingestion.dto import ObjectSearchStatusDto
 from mobile_ingestion.object_search import (ObjectSearchEvent, ObjectSearchPort,
                                             ObjectSearchStatus)
+from mobile_ingestion.session_manager import (SESSION_TOKEN_HEADER,
+                                              SessionAuthorizationError,
+                                              SessionPermissionError)
 
 
 object_search_blueprint = Blueprint("object_search",
@@ -21,6 +24,11 @@ def _object_search() -> ObjectSearchPort:
   return services.object_search
 
 
+def _require_sender_session() -> None:
+  current_app.extensions["mobile_ingestion.services"].session_manager.assert_sender_session(
+      request.headers.get(SESSION_TOKEN_HEADER))
+
+
 @object_search_blueprint.get("/status")
 def status() -> tuple[dict[str, object], int]:
   return jsonify(
@@ -30,6 +38,12 @@ def status() -> tuple[dict[str, object], int]:
 
 @object_search_blueprint.put("/vision-model")
 def update_vision_model() -> tuple[dict[str, object], int]:
+  try:
+    _require_sender_session()
+  except SessionAuthorizationError as exc:
+    return jsonify({"error": str(exc)}), 401
+  except SessionPermissionError as exc:
+    return jsonify({"error": str(exc)}), 403
   payload = request.get_json(silent=True)
   if not isinstance(payload, dict):
     return jsonify({"error": "Request body must be a JSON object."}), 400

@@ -10,6 +10,9 @@ from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoControllerPor
 from mobile_ingestion.dto import (ArduinoCommandDto, ArduinoConnectRequestDto,
                                   ArduinoDebugModeDto, ArduinoStatusDto,
                                   RawFrameEventDto, TelemetrySnapshotDto)
+from mobile_ingestion.session_manager import (SESSION_TOKEN_HEADER,
+                                              SessionAuthorizationError,
+                                              SessionPermissionError)
 
 
 arduino_blueprint = Blueprint("arduino", __name__, url_prefix="/api/arduino")
@@ -18,6 +21,11 @@ arduino_blueprint = Blueprint("arduino", __name__, url_prefix="/api/arduino")
 def _controller() -> ArduinoControllerPort:
   services = current_app.extensions["mobile_ingestion.services"]
   return services.arduino_controller
+
+
+def _require_sender_session() -> None:
+  current_app.extensions["mobile_ingestion.services"].session_manager.assert_sender_session(
+      request.headers.get(SESSION_TOKEN_HEADER))
 
 
 @arduino_blueprint.get("/status")
@@ -34,6 +42,12 @@ def ports() -> tuple[dict[str, object], int]:
 
 @arduino_blueprint.post("/connection")
 def connect() -> tuple[dict[str, object], int]:
+  try:
+    _require_sender_session()
+  except SessionAuthorizationError as exc:
+    return jsonify({"error": str(exc)}), 401
+  except SessionPermissionError as exc:
+    return jsonify({"error": str(exc)}), 403
   payload = request.get_json(silent=True)
   if not isinstance(payload, dict):
     return jsonify({"error": "Request body must be a JSON object."}), 400
@@ -57,6 +71,12 @@ def connect() -> tuple[dict[str, object], int]:
 @arduino_blueprint.delete("/connection")
 def disconnect() -> tuple[dict[str, object], int]:
   try:
+    _require_sender_session()
+  except SessionAuthorizationError as exc:
+    return jsonify({"error": str(exc)}), 401
+  except SessionPermissionError as exc:
+    return jsonify({"error": str(exc)}), 403
+  try:
     _controller().disconnect()
   except RuntimeError as exc:
     current_app.logger.exception("Failed to close Arduino connection.")
@@ -66,6 +86,12 @@ def disconnect() -> tuple[dict[str, object], int]:
 
 @arduino_blueprint.put("/debug")
 def set_debug_mode() -> tuple[dict[str, object], int]:
+  try:
+    _require_sender_session()
+  except SessionAuthorizationError as exc:
+    return jsonify({"error": str(exc)}), 401
+  except SessionPermissionError as exc:
+    return jsonify({"error": str(exc)}), 403
   payload = request.get_json(silent=True)
   if not isinstance(payload, dict):
     return jsonify({"error": "Request body must be a JSON object."}), 400
@@ -81,6 +107,12 @@ def set_debug_mode() -> tuple[dict[str, object], int]:
 
 @arduino_blueprint.put("/debug/command")
 def set_debug_command() -> tuple[dict[str, object], int]:
+  try:
+    _require_sender_session()
+  except SessionAuthorizationError as exc:
+    return jsonify({"error": str(exc)}), 401
+  except SessionPermissionError as exc:
+    return jsonify({"error": str(exc)}), 403
   payload = request.get_json(silent=True)
   if not isinstance(payload, dict):
     return jsonify({"error": "Request body must be a JSON object."}), 400
@@ -98,6 +130,12 @@ def set_debug_command() -> tuple[dict[str, object], int]:
 
 @arduino_blueprint.put("/command")
 def set_backend_command() -> tuple[dict[str, object], int]:
+  try:
+    _require_sender_session()
+  except SessionAuthorizationError as exc:
+    return jsonify({"error": str(exc)}), 401
+  except SessionPermissionError as exc:
+    return jsonify({"error": str(exc)}), 403
   payload = request.get_json(silent=True)
   if not isinstance(payload, dict):
     return jsonify({"error": "Request body must be a JSON object."}), 400

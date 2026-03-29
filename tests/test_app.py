@@ -11,11 +11,14 @@ from mobile_ingestion.analyzer import AnalyzerMetrics, AnalyzerPort, SessionMeta
 from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoEvent,
                                       ArduinoSnapshot, ArduinoSubscription)
 from mobile_ingestion.config import AppConfig
-from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.dto import SessionOfferRequestDto, SessionOfferResponseDto
 from mobile_ingestion.object_search import (ObjectSearchEvent,
                                             ObjectSearchStatus,
                                             ObjectSearchSubscription)
 from mobile_ingestion.services import ServiceContainer
+from mobile_ingestion.session_manager import (SessionAuthorizationError,
+                                              SessionPermissionError,
+                                              SessionUnavailableError)
 from mobile_ingestion.voice import (TranscriptEntry, VoiceEvent,
                                     VoiceStatus, VoiceSubscription,
                                     WakeWordEvent)
@@ -56,24 +59,42 @@ class RecordingAnalyzer(AnalyzerPort):
 
 
 @dataclass
-class FakeStatus:
-  active: bool = False
-  state: str = "idle"
-  connection_state: str = "closed"
+class FakeSlotStatus:
+  role: str
+  state: str = "streaming"
+  connection_state: str = "connected"
   has_video_track: bool = False
   has_audio_track: bool = False
   error: str | None = None
 
   def to_dict(self) -> dict[str, object]:
     return {
+        "role": self.role,
         "state": self.state,
-        "active": self.active,
-        "sessionId": "fake-session" if self.active else None,
+        "active": True,
+        "sessionId": f"{self.role}-session",
         "connectionState": self.connection_state,
         "hasVideoTrack": self.has_video_track,
         "hasAudioTrack": self.has_audio_track,
         "startedAt": None,
         "error": self.error,
+    }
+
+
+@dataclass
+class FakeRoomStatus:
+  room_state: str = "idle"
+  sender: FakeSlotStatus | None = None
+  spectator: FakeSlotStatus | None = None
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "roomState": self.room_state,
+        "senderOccupied": self.sender is not None,
+        "spectatorOccupied": self.spectator is not None,
+        "senderVideoAvailable": bool(self.sender and self.sender.has_video_track),
+        "sender": self.sender.to_dict() if self.sender else None,
+        "spectator": self.spectator.to_dict() if self.spectator else None,
         "analyzerMetrics": AnalyzerMetrics().to_dict(),
     }
 
@@ -81,31 +102,72 @@ class FakeStatus:
 class FakeSessionManager:
 
   def __init__(self) -> None:
-    self.status = FakeStatus()
-    self.closed = 0
-    self.offers: list[SessionDescriptionDto] = []
+    self.status = FakeRoomStatus()
+    self.closed_tokens: list[str | None] = []
+    self.offers: list[SessionOfferRequestDto] = []
+    self.sender_token = "sender-token"
+    self.spectator_token = "spectator-token"
 
-  def accept_offer(self, offer: SessionDescriptionDto) -> SessionDescriptionDto:
+  def accept_offer(self, offer: SessionOfferRequestDto):
     self.offers.append(offer)
-    self.status = FakeStatus(
-        active=True,
-        state="streaming",
-        connection_state="connected",
-        has_video_track=True,
-        has_audio_track=True,
-        error=None,
+    if offer.role == "sender":
+      self.status = FakeRoomStatus(
+          room_state="sender_streaming",
+          sender=FakeSlotStatus(
+              role="sender",
+              has_video_track=True,
+              has_audio_track=True,
+          ),
+          spectator=self.status.spectator,
+      )
+      return SessionOfferResponseDto(
+          sdp="answer-sdp",
+          type="answer",
+          role="sender",
+          session_token=self.sender_token,
+      )
+    if not self.status.sender or not self.status.sender.has_video_track:
+      raise SessionUnavailableError(
+          "A sender with live video is required before a spectator can connect.")
+    self.status = FakeRoomStatus(
+        room_state="full",
+        sender=self.status.sender,
+        spectator=FakeSlotStatus(
+            role="spectator",
+            has_video_track=True,
+            has_audio_track=False,
+        ),
     )
-    return SessionDescriptionDto(sdp="answer-sdp", type="answer")
+    return SessionOfferResponseDto(
+        sdp="answer-sdp",
+        type="answer",
+        role="spectator",
+        session_token=self.spectator_token,
+    )
 
-  def get_status(self) -> FakeStatus:
+  def get_status(self) -> FakeRoomStatus:
     return self.status
 
-  def close_active_session(self) -> None:
-    self.closed += 1
-    self.status = FakeStatus()
+  def close_session(self, session_token: str | None) -> None:
+    self.closed_tokens.append(session_token)
+    if session_token == self.sender_token:
+      self.status = FakeRoomStatus()
+      return
+    if session_token == self.spectator_token:
+      self.status = FakeRoomStatus(
+          room_state="sender_streaming" if self.status.sender else "idle",
+          sender=self.status.sender,
+      )
+
+  def assert_sender_session(self, session_token: str | None) -> None:
+    if session_token == self.sender_token:
+      return
+    if session_token == self.spectator_token:
+      raise SessionPermissionError("Spectator sessions are read-only.")
+    raise SessionAuthorizationError("Invalid or expired session token.")
 
   def shutdown(self) -> None:
-    self.close_active_session()
+    self.close_session(self.sender_token)
 
 
 def make_snapshot(**changes: object) -> ArduinoSnapshot:
@@ -367,6 +429,7 @@ def test_index_renders(client) -> None:
   assert "objectSearchVisionModels" in body
   assert "videoMaxFps" in body
   assert "Dernière transcription" in body
+  assert "Spectator" in body
 
 
 def test_status_route_returns_json(client) -> None:
@@ -374,8 +437,9 @@ def test_status_route_returns_json(client) -> None:
 
   assert response.status_code == 200
   payload = response.get_json()
-  assert payload["state"] == "idle"
-  assert payload["active"] is False
+  assert payload["roomState"] == "idle"
+  assert payload["senderOccupied"] is False
+  assert payload["spectatorOccupied"] is False
 
 
 def test_offer_route_returns_answer(client) -> None:
@@ -383,18 +447,60 @@ def test_offer_route_returns_answer(client) -> None:
                          json={
                              "sdp": "offer-sdp",
                              "type": "offer",
+                             "role": "sender",
                          })
 
   assert response.status_code == 200
   assert response.get_json() == {
       "sdp": "answer-sdp",
       "type": "answer",
+      "role": "sender",
+      "sessionToken": "sender-token",
   }
 
 
+def test_spectator_offer_requires_sender_video(client) -> None:
+  response = client.post("/api/webrtc/offer",
+                         json={
+                             "sdp": "offer-sdp",
+                             "type": "offer",
+                             "role": "spectator",
+                         })
+
+  assert response.status_code == 409
+  assert "sender with live video" in response.get_json()["error"]
+
+
+def test_spectator_offer_succeeds_after_sender(client) -> None:
+  sender_response = client.post("/api/webrtc/offer",
+                                json={
+                                    "sdp": "offer-sdp",
+                                    "type": "offer",
+                                    "role": "sender",
+                                })
+  assert sender_response.status_code == 200
+
+  response = client.post("/api/webrtc/offer",
+                         json={
+                             "sdp": "offer-sdp",
+                             "type": "offer",
+                             "role": "spectator",
+                         })
+
+  assert response.status_code == 200
+  assert response.get_json()["role"] == "spectator"
+  assert response.get_json()["sessionToken"] == "spectator-token"
+
+
 def test_delete_session_is_idempotent(client) -> None:
-  first_response = client.delete("/api/webrtc/session")
-  second_response = client.delete("/api/webrtc/session")
+  first_response = client.delete(
+      "/api/webrtc/session",
+      headers={"X-Session-Token": "sender-token"},
+  )
+  second_response = client.delete(
+      "/api/webrtc/session",
+      headers={"X-Session-Token": "sender-token"},
+  )
 
   assert first_response.status_code == 204
   assert second_response.status_code == 204
@@ -421,7 +527,11 @@ def test_voice_status_route_returns_json(client) -> None:
 
 
 def test_arduino_connect_route_returns_status_snapshot(client) -> None:
-  response = client.post("/api/arduino/connection", json={"port": "/dev/ttyUSB0"})
+  response = client.post(
+      "/api/arduino/connection",
+      headers={"X-Session-Token": "sender-token"},
+      json={"port": "/dev/ttyUSB0"},
+  )
 
   assert response.status_code == 200
   payload = response.get_json()
@@ -446,6 +556,7 @@ def test_object_search_status_route_returns_json(client) -> None:
 
 def test_object_search_vision_model_route_updates_status(client) -> None:
   response = client.put("/api/object-search/vision-model",
+                        headers={"X-Session-Token": "sender-token"},
                         json={"model": "gpt-5.4"})
 
   assert response.status_code == 200
@@ -456,10 +567,22 @@ def test_object_search_vision_model_route_updates_status(client) -> None:
 
 def test_object_search_vision_model_route_rejects_invalid_models(client) -> None:
   response = client.put("/api/object-search/vision-model",
+                        headers={"X-Session-Token": "sender-token"},
                         json={"model": "owlv2"})
 
   assert response.status_code == 400
   assert "Unsupported object-search vision model." in response.get_json()["error"]
+
+
+def test_spectator_cannot_change_vision_model(client) -> None:
+  response = client.put(
+      "/api/object-search/vision-model",
+      headers={"X-Session-Token": "spectator-token"},
+      json={"model": "gpt-5.4"},
+  )
+
+  assert response.status_code == 403
+  assert response.get_json()["error"] == "Spectator sessions are read-only."
 
 
 def test_arduino_ports_route_returns_serial_and_bluetooth_targets(client) -> None:
@@ -478,6 +601,7 @@ def test_arduino_ports_route_returns_serial_and_bluetooth_targets(client) -> Non
 def test_arduino_debug_command_conflict_returns_409(client) -> None:
   response = client.put(
       "/api/arduino/debug/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 45.0,
           "vibrationEnabled": True,
@@ -488,9 +612,24 @@ def test_arduino_debug_command_conflict_returns_409(client) -> None:
   assert response.get_json()["error"] == "manual control unavailable"
 
 
+def test_spectator_cannot_send_arduino_commands(client) -> None:
+  response = client.put(
+      "/api/arduino/command",
+      headers={"X-Session-Token": "spectator-token"},
+      json={
+          "servoAngleDegrees": 45.0,
+          "vibrationEnabled": True,
+      },
+  )
+
+  assert response.status_code == 403
+  assert response.get_json()["error"] == "Spectator sessions are read-only."
+
+
 def test_arduino_command_route_updates_backend_command(client) -> None:
   response = client.put(
       "/api/arduino/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 45.0,
           "vibrationEnabled": True,
@@ -510,11 +649,16 @@ def test_arduino_command_route_updates_backend_command(client) -> None:
 
 def test_arduino_backend_vibration_affects_effective_command_when_debug_enabled(
     client) -> None:
-  debug_response = client.put("/api/arduino/debug", json={"enabled": True})
+  debug_response = client.put(
+      "/api/arduino/debug",
+      headers={"X-Session-Token": "sender-token"},
+      json={"enabled": True},
+  )
   assert debug_response.status_code == 200
 
   debug_command_response = client.put(
       "/api/arduino/debug/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 15.0,
           "vibrationEnabled": False,
@@ -523,11 +667,13 @@ def test_arduino_backend_vibration_affects_effective_command_when_debug_enabled(
   assert debug_command_response.status_code == 409
 
   connect_response = client.post("/api/arduino/connection",
+                                 headers={"X-Session-Token": "sender-token"},
                                  json={"port": "/dev/ttyUSB0"})
   assert connect_response.status_code == 200
 
   debug_command_response = client.put(
       "/api/arduino/debug/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 15.0,
           "vibrationEnabled": False,
@@ -537,6 +683,7 @@ def test_arduino_backend_vibration_affects_effective_command_when_debug_enabled(
 
   backend_command_response = client.put(
       "/api/arduino/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 120.0,
           "vibrationEnabled": True,

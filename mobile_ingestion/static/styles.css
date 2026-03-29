@@ -122,6 +122,11 @@ h1 {
   margin-bottom: 0;
 }
 
+.role-selector-row {
+  align-items: center;
+  margin-bottom: 18px;
+}
+
 .object-search-model-label {
   min-width: 170px;
   font-weight: 700;

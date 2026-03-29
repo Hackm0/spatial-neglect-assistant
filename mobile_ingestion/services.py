@@ -50,7 +50,8 @@ def _build_voice_prompt(settings: AppConfig) -> str | None:
 
 def build_services(settings: AppConfig) -> ServiceContainer:
   try:
-    from mobile_ingestion.webrtc_session import WebRtcPeerSession
+    from mobile_ingestion.webrtc_session import (SenderVideoRelayHub,
+                                                 WebRtcPeerSession)
   except ImportError as exc:
     raise RuntimeError(
         "Missing WebRTC dependencies. Install the project requirements before "
@@ -95,6 +96,7 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       detection_interval_seconds=settings.object_search_detection_interval_seconds,
       command_timeout_seconds=settings.object_search_command_timeout_seconds,
   )
+  sender_video_relay = SenderVideoRelayHub()
   session_manager = SessionManager(
       runtime=runtime,
       analyzer=analyzer,
@@ -102,7 +104,10 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       object_search=object_search,
       settings=settings,
       session_factory=lambda context, callbacks: WebRtcPeerSession(
-          context, callbacks),
+          context,
+          callbacks,
+          sender_video_relay=sender_video_relay,
+      ),
   )
   return ServiceContainer(
       settings=settings,

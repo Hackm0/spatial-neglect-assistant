@@ -3,6 +3,9 @@ const SERVO_MIN_ANGLE = 0;
 const SERVO_MAX_ANGLE = 180;
 const NEUTRAL_SERVO_ANGLE = 90;
 const DEFAULT_MAX_VIDEO_FPS = 5;
+const SESSION_TOKEN_HEADER = "X-Session-Token";
+const SESSION_ROLE_SENDER = "sender";
+const SESSION_ROLE_SPECTATOR = "spectator";
 const VOICE_STATUS_POLL_INTERVAL_MS = 2000;
 const VOICE_EVENT_RECONNECT_DELAY_MS = 1500;
 const OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS = 2000;
@@ -11,6 +14,7 @@ const OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS = 1500;
 const elements = {
   connectButton: document.getElementById("connect-button"),
   disconnectButton: document.getElementById("disconnect-button"),
+  roleSelect: document.getElementById("role-select"),
   errorMessage: document.getElementById("error-message"),
   preview: document.getElementById("local-preview"),
   statusBadge: document.getElementById("status-badge"),
@@ -31,7 +35,12 @@ const elements = {
   objectSearchBadge: document.getElementById("object-search-badge"),
   objectSearchDetail: document.getElementById("object-search-detail"),
   objectSearchTarget: document.getElementById("object-search-target"),
+    objectSearchModelDetailRow: document.getElementById(
+      "object-search-model-detail-row")
+      || document.getElementById("object-search-model-detail")?.closest("p"),
   objectSearchModelDetail: document.getElementById("object-search-model-detail"),
+    objectSearchModelControls: document.getElementById("object-search-model-controls")
+      || document.querySelector(".object-search-model-controls"),
   objectSearchVisionModelSelect: document.getElementById(
       "object-search-vision-model-select"),
   objectSearchModelUpdateStatus: document.getElementById(
@@ -74,7 +83,12 @@ const elements = {
 
 const state = {
   localStream: null,
+  remoteStream: null,
   peerConnection: null,
+  roomStatus: null,
+  requestedRole: SESSION_ROLE_SENDER,
+  connectedRole: null,
+  sessionToken: null,
   statusInterval: null,
   voice: {
     debugVisible: false,
@@ -162,6 +176,42 @@ function clearArduinoError() {
 function setBusy(isBusy) {
   elements.connectButton.disabled = isBusy;
   elements.disconnectButton.disabled = !isBusy;
+  elements.roleSelect.disabled = isBusy;
+}
+
+function selectedRole() {
+  return elements.roleSelect.value || SESSION_ROLE_SENDER;
+}
+
+function hasSenderPrivileges() {
+  return state.connectedRole === SESSION_ROLE_SENDER
+    && typeof state.sessionToken === "string"
+    && state.sessionToken.length > 0;
+}
+
+function isSpectatorSession() {
+  return state.connectedRole === SESSION_ROLE_SPECTATOR;
+}
+
+function isSpectatorView() {
+  const activeRole = state.connectedRole || state.requestedRole || selectedRole();
+  return activeRole === SESSION_ROLE_SPECTATOR;
+}
+
+function buildFetchOptions(options = {}) {
+  const {
+    includeSessionToken = false,
+    headers: rawHeaders,
+    ...fetchOptions
+  } = options;
+  const headers = new Headers(rawHeaders || {});
+  if (includeSessionToken && state.sessionToken) {
+    headers.set(SESSION_TOKEN_HEADER, state.sessionToken);
+  }
+  return {
+    ...fetchOptions,
+    headers,
+  };
 }
 
 function clampServoAngle(value) {
@@ -307,6 +357,34 @@ function clearObjectSearchModelUpdateStatus() {
   clearMessage(elements.objectSearchModelUpdateStatus);
 }
 
+function updateProtectedControls() {
+  const canControl = hasSenderPrivileges();
+  const spectatorView = isSpectatorView();
+
+  if (elements.objectSearchModelDetailRow) {
+    elements.objectSearchModelDetailRow.hidden = spectatorView;
+    elements.objectSearchModelDetailRow.style.display = spectatorView ? "none" : "";
+  }
+  if (elements.objectSearchModelControls) {
+    elements.objectSearchModelControls.hidden = spectatorView;
+    elements.objectSearchModelControls.style.display = spectatorView ? "none" : "";
+  }
+  setObjectSearchModelSelectorEnabled(
+      canControl
+      && !spectatorView
+      && getConfiguredObjectSearchVisionModels().length > 0
+      && !state.objectSearch.modelUpdateInFlight,
+  );
+  updateArduinoDebugVisibility();
+  if (state.arduino.status) {
+    applyArduinoStatus(state.arduino.status, { forceCommandSync: true });
+  } else {
+    setArduinoManualControlsEnabled(false);
+    elements.arduinoConnectButton.disabled = !canControl;
+    elements.arduinoDisconnectButton.disabled = !canControl;
+  }
+}
+
 function syncObjectSearchVisionModelSelector(status) {
   const selectedModel = status?.selectedVisionModel
     || window.APP_CONFIG?.objectSearchVisionModel
@@ -329,9 +407,7 @@ function renderObjectSearchVisionModelOptions() {
   });
 
   syncObjectSearchVisionModelSelector(state.objectSearch.status);
-  setObjectSearchModelSelectorEnabled(
-      models.length > 0 && !state.objectSearch.modelUpdateInFlight,
-  );
+  updateProtectedControls();
 }
 
 function setObjectSearchBadge(label, stateName) {
@@ -414,7 +490,7 @@ function applyObjectSearchStatus(status) {
   elements.objectSearchDetail.textContent = buildObjectSearchDetail(status);
   elements.objectSearchModelDetail.textContent = buildObjectSearchModelDetail(status);
   syncObjectSearchVisionModelSelector(status);
-  setObjectSearchModelSelectorEnabled(!state.objectSearch.modelUpdateInFlight);
+  updateProtectedControls();
   const hasPendingTarget = Boolean(status.targetLabel) && !status.detected;
 
   let badgeLabel = "Inactif";
@@ -457,6 +533,17 @@ async function fetchObjectSearchStatus() {
 }
 
 async function updateObjectSearchVisionModel(model) {
+  if (!hasSenderPrivileges()) {
+    showObjectSearchError(
+        "Connecte-toi comme sender pour changer le modele vision.",
+    );
+    elements.objectSearchVisionModelSelect.value = (
+      state.objectSearch.status?.selectedVisionModel
+      || window.APP_CONFIG?.objectSearchVisionModel
+      || ""
+    );
+    return;
+  }
   const fallbackModel = state.objectSearch.status?.selectedVisionModel
     || window.APP_CONFIG?.objectSearchVisionModel
     || "";
@@ -472,6 +559,7 @@ async function updateObjectSearchVisionModel(model) {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ model }),
+      includeSessionToken: true,
     });
     state.objectSearch.modelUpdateInFlight = false;
     window.APP_CONFIG.objectSearchVisionModel = payload.selectedVisionModel || model;
@@ -486,7 +574,7 @@ async function updateObjectSearchVisionModel(model) {
     showObjectSearchModelUpdateStatus(
         "Le changement de modèle a échoué.",
     );
-    setObjectSearchModelSelectorEnabled(true);
+    updateProtectedControls();
     throw error;
   }
 }
@@ -577,9 +665,7 @@ function resetObjectSearchState() {
   setObjectSearchBadge("Inactif", "idle");
   syncObjectSearchVisionModelSelector(null);
   clearObjectSearchModelUpdateStatus();
-  setObjectSearchModelSelectorEnabled(
-      getConfiguredObjectSearchVisionModels().length > 0,
-  );
+  updateProtectedControls();
   clearObjectSearchError();
 }
 
@@ -705,6 +791,9 @@ function ensureVoiceAudioContext() {
 }
 
 function playWakeWordTone() {
+  if (isSpectatorSession()) {
+    return;
+  }
   ensureVoiceAudioContext();
   if (!state.voice.audioContext) {
     return;
@@ -861,11 +950,12 @@ function resetVoiceState() {
 }
 
 function setArduinoManualControlsEnabled(isEnabled) {
-  elements.arduinoServoRange.disabled = !isEnabled;
-  elements.arduinoServoNumber.disabled = !isEnabled;
-  elements.arduinoVibrationToggle.disabled = !isEnabled;
-  elements.arduinoCenterButton.disabled = !isEnabled;
-  elements.arduinoAllStopButton.disabled = !isEnabled;
+  const controlsEnabled = isEnabled && hasSenderPrivileges();
+  elements.arduinoServoRange.disabled = !controlsEnabled;
+  elements.arduinoServoNumber.disabled = !controlsEnabled;
+  elements.arduinoVibrationToggle.disabled = !controlsEnabled;
+  elements.arduinoCenterButton.disabled = !controlsEnabled;
+  elements.arduinoAllStopButton.disabled = !controlsEnabled;
 }
 
 function syncArduinoCommandInputs(command) {
@@ -932,6 +1022,7 @@ function applyArduinoStatus(status, options = {}) {
   const { replaceLog = false, forceCommandSync = false } = options;
   state.arduino.status = status;
   state.arduino.selectedPort = status.selectedPort || state.arduino.selectedPort;
+  const canControl = hasSenderPrivileges();
 
   elements.arduinoAvailabilityDetail.textContent = status.available
     ? "Prêt côté serveur"
@@ -944,8 +1035,8 @@ function applyArduinoStatus(status, options = {}) {
   elements.arduinoInvalidCount.textContent = String(status.invalidFrameCount);
   elements.arduinoLastRx.textContent = formatTimestamp(status.lastRxTimestamp);
   elements.arduinoDebugBadge.textContent = status.debugEnabled ? "Actif" : "Inactif";
-  elements.arduinoConnectButton.disabled = !status.available || status.connected;
-  elements.arduinoDisconnectButton.disabled = !status.connected;
+  elements.arduinoConnectButton.disabled = !canControl || !status.available || status.connected;
+  elements.arduinoDisconnectButton.disabled = !canControl || !status.connected;
   setArduinoManualControlsEnabled(status.connected);
 
   const serverCommand = commandFromStatus(status);
@@ -1012,7 +1103,7 @@ function renderArduinoPortOptions(ports) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, buildFetchOptions(options));
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     throw new Error(payload?.error || "La requete a echoue.");
@@ -1059,15 +1150,46 @@ async function requestLocalStream() {
   return fallbackStream;
 }
 
-function buildPeerConnection() {
+function buildPeerConnection(role) {
   const iceServers = (window.APP_CONFIG?.iceServers || []).map((url) => ({ urls: url }));
   const connection = new RTCPeerConnection({ iceServers });
 
+  if (role === SESSION_ROLE_SPECTATOR) {
+    state.remoteStream = new MediaStream();
+    connection.addEventListener("track", (event) => {
+      if (state.peerConnection !== connection || event.track.kind !== "video") {
+        return;
+      }
+      const remoteStream = event.streams?.[0] || state.remoteStream;
+      if (remoteStream !== state.remoteStream) {
+        state.remoteStream = remoteStream;
+      } else {
+        state.remoteStream.addTrack(event.track);
+      }
+      elements.preview.srcObject = state.remoteStream;
+      setStatus("Spectator", "La video du sender est affichee en direct.");
+    });
+  }
+
   connection.addEventListener("connectionstatechange", () => {
+    if (state.peerConnection !== connection) {
+      return;
+    }
     const label = `WebRTC ${connection.connectionState}`;
     setStatus(label, "Le navigateur maintient la connexion avec le serveur.");
     if (["failed", "disconnected", "closed"].includes(connection.connectionState)) {
       setBusy(false);
+      if (state.connectedRole === SESSION_ROLE_SPECTATOR) {
+        window.setTimeout(() => {
+          disconnect({ notifyServer: false, preserveStatus: true }).catch((error) => {
+            console.error(error);
+          });
+          setStatus(
+              "En attente",
+              "Le flux du sender n'est plus disponible. Reconnecte-toi ou change de role.",
+          );
+        }, 0);
+      }
     }
   });
 
@@ -1098,10 +1220,46 @@ function waitForIceGatheringComplete(connection) {
 
 async function fetchStatus() {
   const payload = await requestJson("/api/webrtc/status");
-  const detail = payload.active
-    ? `Session ${payload.state}, etat pair: ${payload.connectionState}.`
-    : payload.error || "Aucune session active.";
-  setStatus(payload.state, detail);
+  state.roomStatus = payload;
+
+  if (state.connectedRole === SESSION_ROLE_SENDER) {
+    setStatus(
+        "Sender",
+        payload.spectatorOccupied
+          ? "Votre flux est en direct et un spectator est connecte."
+          : "Votre flux est en direct. Le slot spectator est libre.",
+    );
+    return payload;
+  }
+
+  if (state.connectedRole === SESSION_ROLE_SPECTATOR) {
+    setStatus(
+        "Spectator",
+        payload.senderVideoAvailable
+          ? "Vous regardez la video du sender."
+          : "En attente du flux video du sender.",
+    );
+    return payload;
+  }
+
+  if (payload.senderVideoAvailable && payload.spectatorOccupied) {
+    setStatus("Salle pleine", "Un sender et un spectator sont deja connectes.");
+    return payload;
+  }
+  if (payload.senderVideoAvailable) {
+    setStatus("Sender actif", "Un sender diffuse deja. Le mode spectator est disponible.");
+    return payload;
+  }
+  if (payload.senderOccupied) {
+    setStatus(
+        "Preparation",
+        "Le sender se connecte. Attends que la video soit disponible pour rejoindre en spectator.",
+    );
+    return payload;
+  }
+
+  setStatus("En attente", "Aucune session active.");
+  return payload;
 }
 
 function startStatusPolling() {
@@ -1123,45 +1281,87 @@ function stopStatusPolling() {
 async function connect() {
   clearError();
   clearVoiceError();
-  ensureVoiceAudioContext();
+  state.requestedRole = selectedRole();
 
-  if (!window.isSecureContext && window.location.hostname !== "localhost") {
-    showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
-    return;
-  }
+  if (state.requestedRole === SESSION_ROLE_SENDER) {
+    ensureVoiceAudioContext();
 
-  if (!navigator.mediaDevices?.getUserMedia) {
-    showError("Ce navigateur ne supporte pas getUserMedia.");
-    return;
+    if (!window.isSecureContext && window.location.hostname !== "localhost") {
+      showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      showError("Ce navigateur ne supporte pas getUserMedia.");
+      return;
+    }
   }
 
   setBusy(true);
-  setStatus("Preparation", "Demande des permissions camera et micro...");
+  setStatus(
+      state.requestedRole === SESSION_ROLE_SENDER ? "Preparation" : "Spectator",
+      state.requestedRole === SESSION_ROLE_SENDER
+        ? "Demande des permissions camera et micro..."
+        : "Connexion au flux video du sender...",
+  );
 
   try {
-    state.localStream = await requestLocalStream();
-    elements.preview.srcObject = state.localStream;
+    if (state.requestedRole === SESSION_ROLE_SENDER) {
+      state.localStream = await requestLocalStream();
+      elements.preview.srcObject = state.localStream;
+    } else {
+      state.localStream = null;
+      state.remoteStream = new MediaStream();
+      elements.preview.srcObject = null;
+    }
 
-    state.peerConnection = buildPeerConnection();
-    state.localStream.getTracks().forEach((track) => {
-      state.peerConnection.addTrack(track, state.localStream);
-    });
+    state.peerConnection = buildPeerConnection(state.requestedRole);
+    if (state.requestedRole === SESSION_ROLE_SENDER) {
+      state.localStream.getTracks().forEach((track) => {
+        state.peerConnection.addTrack(track, state.localStream);
+      });
+    } else {
+      state.peerConnection.addTransceiver("video", { direction: "recvonly" });
+    }
 
     const offer = await state.peerConnection.createOffer();
     await state.peerConnection.setLocalDescription(offer);
     await waitForIceGatheringComplete(state.peerConnection);
 
+    const localDescription = state.peerConnection.localDescription;
+    if (!localDescription?.sdp || !localDescription?.type) {
+      throw new Error("L'offre WebRTC locale est incomplète.");
+    }
+
     setStatus("Negociation", "Envoi de l'offre WebRTC au serveur...");
     const payload = await requestJson("/api/webrtc/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(state.peerConnection.localDescription),
+      body: JSON.stringify({
+        sdp: localDescription.sdp,
+        type: localDescription.type,
+        role: state.requestedRole,
+      }),
     });
 
-    await state.peerConnection.setRemoteDescription(payload);
-    setStatus("Streaming", "Le flux mobile est connecte au serveur.");
-    await fetchVoiceStatus();
-    await fetchObjectSearchStatus();
+    state.sessionToken = payload.sessionToken || null;
+    state.connectedRole = payload.role || state.requestedRole;
+    updateProtectedControls();
+    await state.peerConnection.setRemoteDescription({
+      sdp: payload.sdp,
+      type: payload.type,
+    });
+    setStatus(
+        state.connectedRole === SESSION_ROLE_SENDER ? "Sender" : "Spectator",
+        state.connectedRole === SESSION_ROLE_SENDER
+          ? "Votre camera et votre micro sont connectes au serveur."
+          : "En attente de la video du sender...",
+    );
+    await Promise.all([
+      fetchVoiceStatus(),
+      fetchObjectSearchStatus(),
+      fetchStatus(),
+    ]);
     startVoiceStatusPolling();
     startObjectSearchStatusPolling();
     openVoiceEventStream();
@@ -1171,12 +1371,18 @@ async function connect() {
     console.error(error);
     await disconnect({ notifyServer: true, preserveStatus: true });
     showError(error.message || "La connexion a echoue.");
-    setStatus("Erreur", "Le flux n'a pas pu etre etabli.");
+    setStatus(
+        "Erreur",
+        state.requestedRole === SESSION_ROLE_SENDER
+          ? "Le flux n'a pas pu etre etabli."
+          : "Le mode spectator n'a pas pu etre etabli.",
+    );
   }
 }
 
 async function disconnect(options = {}) {
   const { notifyServer = true, preserveStatus = false } = options;
+  const sessionToken = state.sessionToken;
 
   stopStatusPolling();
   stopVoiceStatusPolling();
@@ -1185,9 +1391,10 @@ async function disconnect(options = {}) {
   clearObjectSearchReconnectTimer();
 
   if (state.peerConnection) {
-    state.peerConnection.getSenders().forEach((sender) => sender.track?.stop());
-    state.peerConnection.close();
+    const peerConnection = state.peerConnection;
     state.peerConnection = null;
+    peerConnection.getSenders().forEach((sender) => sender.track?.stop());
+    peerConnection.close();
   }
 
   if (state.localStream) {
@@ -1195,19 +1402,30 @@ async function disconnect(options = {}) {
     state.localStream = null;
   }
 
+  state.remoteStream = null;
+  state.sessionToken = null;
+  state.connectedRole = null;
   elements.preview.srcObject = null;
   setBusy(false);
+  updateProtectedControls();
 
-  if (notifyServer) {
+  if (notifyServer && sessionToken) {
     try {
-      await fetch("/api/webrtc/session", { method: "DELETE" });
+      await fetch("/api/webrtc/session", buildFetchOptions({
+        method: "DELETE",
+        headers: {
+          [SESSION_TOKEN_HEADER]: sessionToken,
+        },
+      }));
     } catch (error) {
       console.error(error);
     }
   }
 
   if (!preserveStatus) {
-    setStatus("En attente", "Aucune session active.");
+    await fetchStatus().catch(() => {
+      setStatus("En attente", "Aucune session active.");
+    });
   }
 
   closeVoiceEventStream();
@@ -1262,35 +1480,49 @@ function openArduinoEventStream() {
 }
 
 async function setArduinoDebugMode(enabled) {
+  if (!hasSenderPrivileges()) {
+    throw new Error(
+        "Connecte-toi comme sender pour modifier le mode debug Arduino.",
+    );
+  }
   const payload = await requestJson("/api/arduino/debug", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
+    includeSessionToken: true,
   });
   applyArduinoStatus(payload);
 }
 
 async function connectArduino() {
+  if (!hasSenderPrivileges()) {
+    throw new Error("Connecte-toi comme sender pour controler l'Arduino.");
+  }
   clearArduinoError();
   state.arduino.selectedPort = elements.arduinoPortSelect.value;
   const payload = await requestJson("/api/arduino/connection", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ port: state.arduino.selectedPort }),
+    includeSessionToken: true,
   });
   applyArduinoStatus(payload, { replaceLog: true });
 }
 
 async function disconnectArduino() {
+  if (!hasSenderPrivileges()) {
+    throw new Error("Connecte-toi comme sender pour controler l'Arduino.");
+  }
   clearArduinoError();
   const payload = await requestJson("/api/arduino/connection", {
     method: "DELETE",
+    includeSessionToken: true,
   });
   applyArduinoStatus(payload, { replaceLog: true });
 }
 
 async function sendArduinoCommand() {
-  if (!state.arduino.status?.connected) {
+  if (!hasSenderPrivileges() || !state.arduino.status?.connected) {
     return;
   }
 
@@ -1312,6 +1544,7 @@ async function sendArduinoCommand() {
         servoAngleDegrees: commandToSend.servoAngleDegrees,
         vibrationEnabled: commandToSend.vibrationEnabled,
       }),
+      includeSessionToken: true,
     });
     state.arduino.commandDirty = false;
     applyArduinoStatus(payload);
@@ -1336,8 +1569,10 @@ function scheduleArduinoCommandSync() {
 function updateArduinoDebugVisibility() {
   elements.arduinoDebugPanel.hidden = !state.arduino.debugVisible;
   elements.debugToggleButton.textContent = state.arduino.debugVisible
-    ? "Masquer le debug Arduino"
-    : "Activer le debug Arduino";
+    ? "Masquer Arduino"
+    : (hasSenderPrivileges()
+      ? "Activer le debug Arduino"
+      : "Voir Arduino (lecture seule)");
 }
 
 function toggleVoiceDebugPanel() {
@@ -1354,10 +1589,12 @@ async function toggleArduinoDebugPanel() {
     try {
       await Promise.all([fetchArduinoStatus(), fetchArduinoPorts()]);
       openArduinoEventStream();
-      await setArduinoDebugMode(true);
+      if (hasSenderPrivileges()) {
+        await setArduinoDebugMode(true);
+      }
     } catch (error) {
       console.error(error);
-      showArduinoError(error.message || "Impossible d'activer le debug Arduino.");
+      showArduinoError(error.message || "Impossible d'ouvrir le panneau Arduino.");
     }
     return;
   }
@@ -1368,10 +1605,12 @@ async function toggleArduinoDebugPanel() {
     state.arduino.commandSyncTimeout = null;
   }
 
-  try {
-    await setArduinoDebugMode(false);
-  } catch (error) {
-    console.error(error);
+  if (hasSenderPrivileges()) {
+    try {
+      await setArduinoDebugMode(false);
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   state.arduino.debugVisible = false;
@@ -1401,6 +1640,12 @@ elements.disconnectButton.addEventListener("click", () => {
     console.error(error);
     showError("La deconnexion a echoue.");
   });
+});
+
+elements.roleSelect.addEventListener("change", (event) => {
+  state.requestedRole = event.target.value;
+  clearError();
+  updateProtectedControls();
 });
 
 elements.objectSearchVisionModelSelect.addEventListener("change", (event) => {
@@ -1510,6 +1755,7 @@ window.addEventListener("beforeunload", () => {
 });
 
 updateVoiceDebugVisibility();
+state.requestedRole = selectedRole();
 renderObjectSearchVisionModelOptions();
 resetVoiceState();
 resetObjectSearchState();
@@ -1517,6 +1763,7 @@ updateArduinoDebugVisibility();
 setArduinoManualControlsEnabled(false);
 applyArduinoTelemetry(null);
 renderProtocolLog();
+updateProtectedControls();
 
 fetchStatus().catch(() => {
   setStatus("Serveur", "Le serveur est pret, mais le statut initial n'a pas pu etre lu.");

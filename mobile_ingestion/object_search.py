@@ -1115,8 +1115,6 @@ class ObjectSearchCoordinator(ObjectSearchPort):
         )
     if active_session_id is not None and not runtime_status.model_ready:
       self._ensure_detector_prepare_started(active_session_id)
-    if active_session_id is not None:
-      self._feedback.clear(active_session_id)
     self._broadcast_status()
     return self.snapshot()
 

@@ -12,9 +12,19 @@
         <div class="eyebrow">Spatial Neglect Assistant</div>
         <h1>Connexion mobile temps réel</h1>
         <p class="description">
-          Cette page ouvre la caméra et le micro du téléphone, puis envoie le flux
-          au serveur Flask via WebRTC.
+          Choisissez un rôle avant de vous connecter: le sender diffuse caméra +
+          micro vers le serveur, le spectator regarde uniquement la vidéo du sender.
         </p>
+
+        <div class="inline-controls role-selector-row">
+          <label class="object-search-model-label" for="role-select">
+            Rôle
+          </label>
+          <select id="role-select" class="debug-select object-search-model-select">
+            <option value="sender">Sender</option>
+            <option value="spectator">Spectator</option>
+          </select>
+        </div>
 
         <div class="status-row">
           <span class="status-label">Statut</span>
@@ -38,11 +48,11 @@
             Cible courante:
             <strong id="object-search-target">--</strong>
           </p>
-          <p class="object-search-target-row">
+          <p id="object-search-model-detail-row" class="object-search-target-row">
             Modèle vision:
             <strong id="object-search-model-detail">--</strong>
           </p>
-          <div class="inline-controls object-search-model-controls">
+          <div id="object-search-model-controls" class="inline-controls object-search-model-controls">
             <label class="object-search-model-label" for="object-search-vision-model-select">
               Sélection du modèle
             </label>
@@ -295,6 +305,6 @@
         objectSearchVisionModel: {{ object_search_vision_model | tojson }},
       };
     </script>
-    <script src="{{ url_for('static', filename='app.js', v='20260329-object-search4') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js', v='20260329-sender-spectator-model-visibility') }}" defer></script>
   </body>
 </html>
