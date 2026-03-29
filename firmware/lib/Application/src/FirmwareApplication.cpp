@@ -8,7 +8,7 @@ namespace {
 
 constexpr float kMinimumNormalizedInput = -1.0F;
 constexpr float kMaximumNormalizedInput = 1.0F;
-constexpr unsigned long kMaxContinuousVibrationOnMs = 250UL;
+constexpr unsigned long kMaxContinuousVibrationOnMs = 150UL;
 
 float clampFloat(const float value, const float minimum, const float maximum) {
   if (value < minimum) {
@@ -113,7 +113,7 @@ bool FirmwareApplication::begin() {
   static_cast<void>(accelerometer_.begin());
   refreshSensors();
   captureDistanceState();
-  applyActuatorCommand(commandSupervisor_.currentCommand(nowMs));
+  applyActuatorCommand(commandSupervisor_.currentCommand(nowMs), false);
 
   return distanceSensorInitialized && servoInitialized;
 }
@@ -137,7 +137,10 @@ void FirmwareApplication::update(const unsigned long nowMs) {
     commandSupervisor_.acceptCommand(receivedCommand, nowMs);
   }
 
-  applyActuatorCommand(commandSupervisor_.currentCommand(nowMs));
+  const ActuatorCommand command = commandSupervisor_.currentCommand(nowMs);
+  const bool autonomousVibrationEnabled =
+      autonomousVibrationController_.update(latestSnapshot_, nowMs);
+  applyActuatorCommand(command, autonomousVibrationEnabled);
   vibrationMotor_.update(nowMs);
   servoMotor_.update(nowMs);
 
@@ -179,9 +182,11 @@ void FirmwareApplication::resetSecondaryTransportReception() {
   secondaryProtocolEndpoint_.resetReception();
 }
 
-void FirmwareApplication::applyActuatorCommand(const ActuatorCommand& command) {
+void FirmwareApplication::applyActuatorCommand(
+    const ActuatorCommand& command, const bool autonomousVibrationEnabled) {
   servoMotor_.setTargetAngle(command.servoAngleDegrees);
-  vibrationMotor_.setEnabled(command.vibrationEnabled);
+  vibrationMotor_.setEnabled(command.vibrationEnabled ||
+                             autonomousVibrationEnabled);
 }
 
 void FirmwareApplication::captureDistanceState() {

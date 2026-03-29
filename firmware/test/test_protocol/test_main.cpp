@@ -324,7 +324,7 @@ void test_command_timeout_returns_failsafe_output() {
   ActuatorCommand current = supervisor.currentCommand(200UL);
   TEST_ASSERT_FALSE(supervisor.isFailsafeActive(200UL));
   TEST_ASSERT_FLOAT_WITHIN(0.05F, 135.0F, current.servoAngleDegrees);
-  TEST_ASSERT_TRUE(current.vibrationEnabled);
+  TEST_ASSERT_FALSE(current.vibrationEnabled);
 
   current = supervisor.currentCommand(260UL);
   TEST_ASSERT_TRUE(supervisor.isFailsafeActive(260UL));
@@ -333,15 +333,15 @@ void test_command_timeout_returns_failsafe_output() {
 }
 
 void test_vibration_guard_turns_off_after_max_on_window() {
-  ActuatorCommandSupervisor supervisor(90.0F, 10000UL, 250UL);
+  ActuatorCommandSupervisor supervisor(90.0F, 10000UL, 150UL);
 
   const ActuatorCommand command = {135.0F, true};
   supervisor.acceptCommand(command, 10UL);
 
-  ActuatorCommand current = supervisor.currentCommand(200UL);
+  ActuatorCommand current = supervisor.currentCommand(120UL);
   TEST_ASSERT_TRUE(current.vibrationEnabled);
 
-  current = supervisor.currentCommand(260UL);
+  current = supervisor.currentCommand(160UL);
   TEST_ASSERT_FALSE(current.vibrationEnabled);
 
   supervisor.acceptCommand(command, 270UL);

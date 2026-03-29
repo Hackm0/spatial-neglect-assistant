@@ -4,6 +4,7 @@
 #include <Wire.h>
 
 #include <ActuatorCommandSupervisor.h>
+#include <AutonomousVibrationController.h>
 #include <AnalogJoystick.h>
 #include <ExclusiveTransportLock.h>
 #include <HcSr04DistanceSensor.h>
@@ -38,7 +39,8 @@ class FirmwareApplication {
   void resetSecondaryTransportReception();
 
  private:
-  void applyActuatorCommand(const ActuatorCommand& command);
+  void applyActuatorCommand(const ActuatorCommand& command,
+                            bool autonomousVibrationEnabled);
   void captureDistanceState();
   void refreshSensors();
   void setAccelerometerUnavailable();
@@ -59,5 +61,6 @@ class FirmwareApplication {
   MillisInterval accelerometerRetryInterval_;
   ExclusiveTransportLock transportLock_;
   ActuatorCommandSupervisor commandSupervisor_;
+  AutonomousVibrationController autonomousVibrationController_;
   SensorSnapshot latestSnapshot_;
 };

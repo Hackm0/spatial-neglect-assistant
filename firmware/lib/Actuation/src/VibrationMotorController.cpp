@@ -2,7 +2,7 @@
 
 namespace {
 
-constexpr unsigned long kMaxContinuousOnMs = 250UL;
+constexpr unsigned long kMaxContinuousOnMs = 150UL;
 
 }  // namespace
 

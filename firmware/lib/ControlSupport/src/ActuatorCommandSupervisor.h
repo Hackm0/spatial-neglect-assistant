@@ -7,7 +7,7 @@ class ActuatorCommandSupervisor {
  public:
   ActuatorCommandSupervisor(float neutralServoAngleDegrees,
                             unsigned long commandTimeoutMs,
-                            unsigned long vibrationMaxOnMs = 250UL);
+                            unsigned long vibrationMaxOnMs = 150UL);
 
   void acceptCommand(const ActuatorCommand& command, unsigned long nowMs);
   ActuatorCommand currentCommand(unsigned long nowMs);
