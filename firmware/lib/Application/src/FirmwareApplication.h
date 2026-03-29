@@ -9,6 +9,7 @@
 #include <ExclusiveTransportLock.h>
 #include <HcSr04DistanceSensor.h>
 #include <IByteStream.h>
+#include <LedScaleController.h>
 #include <MillisInterval.h>
 #include <Mpu9250Accelerometer.h>
 #include <ProtocolTypes.h>
@@ -21,6 +22,7 @@ struct FirmwareApplicationConfig {
   AnalogJoystickConfig joystickConfig;
   ServoMotorConfig servoConfig;
   VibrationMotorConfig vibrationMotorConfig;
+  LedScaleConfig ledScaleConfig;
   ProtocolConfig protocolConfig;
   unsigned long sensorSampleIntervalMs;
   unsigned long accelerometerRetryIntervalMs;
@@ -52,6 +54,7 @@ class FirmwareApplication {
   UartProtocolEndpoint secondaryProtocolEndpoint_;
   Mpu9250Accelerometer accelerometer_;
   AnalogJoystick joystick_;
+  LedScaleController ledScale_;
   HcSr04DistanceSensor distanceSensor_;
   ServoMotorController servoMotor_;
   VibrationMotorController vibrationMotor_;
@@ -63,4 +66,6 @@ class FirmwareApplication {
   ActuatorCommandSupervisor commandSupervisor_;
   AutonomousVibrationController autonomousVibrationController_;
   SensorSnapshot latestSnapshot_;
+  float virtualOutputPosition_;
+  float virtualOutputVelocity_;
 };
