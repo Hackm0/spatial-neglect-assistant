@@ -25,7 +25,7 @@ struct ProtocolConfig {
   unsigned long secondaryBaudRate = 9600UL;
   unsigned long telemetryIntervalMs = 50UL;
   unsigned long secondaryTelemetryIntervalMs = 500UL;
-  unsigned long commandTimeoutMs = 500UL;
+  unsigned long commandTimeoutMs = 10000UL;
 };
 
 enum class UartMessageType : uint8_t {

@@ -1,5 +1,12 @@
 #include "Mpu9250Accelerometer.h"
 
+namespace {
+
+// Keep the bus responsive if a noisy peripheral event leaves I2C in a bad state.
+constexpr unsigned long kI2cTimeoutUs = 5000UL;
+
+}  // namespace
+
 Mpu9250Accelerometer::Mpu9250Accelerometer(TwoWire& wire,
                                            const uint8_t address)
     : wire_(wire),
@@ -13,6 +20,10 @@ bool Mpu9250Accelerometer::begin() {
   initialized_ = false;
 
   wire_.begin();
+#if defined(WIRE_HAS_TIMEOUT)
+  wire_.setWireTimeout(kI2cTimeoutUs, true);
+  wire_.clearWireTimeoutFlag();
+#endif
   sensor_.setWire(&wire_);
 
   uint8_t sensorId = 0U;
@@ -26,9 +37,29 @@ bool Mpu9250Accelerometer::begin() {
 }
 
 bool Mpu9250Accelerometer::refresh() {
-  if (!initialized_ || sensor_.accelUpdate() != 0U) {
+  if (!initialized_) {
     return false;
   }
+
+#if defined(WIRE_HAS_TIMEOUT)
+  wire_.clearWireTimeoutFlag();
+#endif
+
+  if (sensor_.accelUpdate() != 0U) {
+#if defined(WIRE_HAS_TIMEOUT)
+    if (wire_.getWireTimeoutFlag()) {
+      wire_.clearWireTimeoutFlag();
+    }
+#endif
+    return false;
+  }
+
+#if defined(WIRE_HAS_TIMEOUT)
+  if (wire_.getWireTimeoutFlag()) {
+    wire_.clearWireTimeoutFlag();
+    return false;
+  }
+#endif
 
   accelX_ = sensor_.accelX();
   accelY_ = sensor_.accelY();

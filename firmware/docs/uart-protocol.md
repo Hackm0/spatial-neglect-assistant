@@ -45,7 +45,7 @@ Payload length: `3`
 Behavior:
 - The device clamps the servo angle to the configured servo limits before applying it.
 - The host should resend this frame at least every `200 ms`.
-- If no valid command arrives for `500 ms`, the device enters fail-safe: servo target returns to its configured neutral angle and vibration turns off.
+- If no valid command arrives for `10000 ms`, the device enters fail-safe: servo target returns to its configured neutral angle and vibration turns off.
 
 ### `0x81` TelemetrySnapshot
 

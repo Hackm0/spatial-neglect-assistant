@@ -53,6 +53,9 @@ const state = {
     debugVisible: false,
     eventSource: null,
     commandSyncTimeout: null,
+    commandDirty: false,
+    commandInFlight: false,
+    pendingCommandAck: null,
     status: null,
     selectedPort: "",
     command: {
@@ -174,6 +177,20 @@ function syncArduinoCommandInputs(command) {
   elements.arduinoVibrationToggle.checked = command.vibrationEnabled;
 }
 
+function commandFromStatus(status) {
+  const command = status.debugEnabled ? status.debugCommand : status.effectiveCommand;
+  return {
+    servoAngleDegrees: Number(command.servoAngleDegrees),
+    vibrationEnabled: Boolean(command.vibrationEnabled),
+  };
+}
+
+function commandsEqual(left, right) {
+  const angleDelta = Math.abs(Number(left.servoAngleDegrees) - Number(right.servoAngleDegrees));
+  return angleDelta < 0.1
+    && Boolean(left.vibrationEnabled) === Boolean(right.vibrationEnabled);
+}
+
 function applyArduinoTelemetry(telemetry) {
   if (!telemetry) {
     elements.arduinoDistance.textContent = "--";
@@ -215,7 +232,7 @@ function applyArduinoTelemetry(telemetry) {
 }
 
 function applyArduinoStatus(status, options = {}) {
-  const { replaceLog = false } = options;
+  const { replaceLog = false, forceCommandSync = false } = options;
   state.arduino.status = status;
   state.arduino.selectedPort = status.selectedPort || state.arduino.selectedPort;
 
@@ -232,16 +249,33 @@ function applyArduinoStatus(status, options = {}) {
   elements.arduinoDebugBadge.textContent = status.debugEnabled ? "Actif" : "Inactif";
   elements.arduinoConnectButton.disabled = !status.available || status.connected;
   elements.arduinoDisconnectButton.disabled = !status.connected;
-  setArduinoManualControlsEnabled(status.debugEnabled && status.connected);
+  setArduinoManualControlsEnabled(status.connected);
 
-  const commandToRender = status.debugEnabled
-    ? status.debugCommand
-    : status.effectiveCommand;
-  state.arduino.command = {
-    servoAngleDegrees: Number(commandToRender.servoAngleDegrees),
-    vibrationEnabled: Boolean(commandToRender.vibrationEnabled),
-  };
-  syncArduinoCommandInputs(state.arduino.command);
+  const serverCommand = commandFromStatus(status);
+  if (state.arduino.pendingCommandAck
+      && commandsEqual(serverCommand, state.arduino.pendingCommandAck)) {
+    state.arduino.pendingCommandAck = null;
+  }
+
+  const waitingForCommandEcho = status.connected
+    && state.arduino.pendingCommandAck
+    && !commandsEqual(serverCommand, state.arduino.pendingCommandAck);
+  const preserveLocalCommand = status.connected
+    && !forceCommandSync
+    && (state.arduino.commandDirty
+        || state.arduino.commandInFlight
+        || waitingForCommandEcho);
+  if (!preserveLocalCommand) {
+    state.arduino.command = serverCommand;
+    syncArduinoCommandInputs(state.arduino.command);
+    state.arduino.commandDirty = false;
+  }
+
+  if (!status.connected) {
+    state.arduino.commandDirty = false;
+    state.arduino.commandInFlight = false;
+    state.arduino.pendingCommandAck = null;
+  }
   applyArduinoTelemetry(status.latestTelemetry);
 
   if (replaceLog && Array.isArray(status.recentFrames)) {
@@ -526,21 +560,35 @@ async function disconnectArduino() {
   applyArduinoStatus(payload, { replaceLog: true });
 }
 
-async function sendArduinoDebugCommand() {
-  if (!(state.arduino.status?.debugEnabled && state.arduino.status?.connected)) {
+async function sendArduinoCommand() {
+  if (!state.arduino.status?.connected) {
     return;
   }
 
   clearArduinoError();
-  const payload = await requestJson("/api/arduino/debug/command", {
-    method: "PUT",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      servoAngleDegrees: state.arduino.command.servoAngleDegrees,
-      vibrationEnabled: state.arduino.command.vibrationEnabled,
-    }),
-  });
-  applyArduinoStatus(payload);
+  state.arduino.commandInFlight = true;
+  const commandToSend = {
+    servoAngleDegrees: state.arduino.command.servoAngleDegrees,
+    vibrationEnabled: state.arduino.command.vibrationEnabled,
+  };
+  state.arduino.pendingCommandAck = { ...commandToSend };
+  const commandEndpoint = state.arduino.status.debugEnabled
+    ? "/api/arduino/debug/command"
+    : "/api/arduino/command";
+  try {
+    const payload = await requestJson(commandEndpoint, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        servoAngleDegrees: commandToSend.servoAngleDegrees,
+        vibrationEnabled: commandToSend.vibrationEnabled,
+      }),
+    });
+    state.arduino.commandDirty = false;
+    applyArduinoStatus(payload);
+  } finally {
+    state.arduino.commandInFlight = false;
+  }
 }
 
 function scheduleArduinoCommandSync() {
@@ -549,7 +597,7 @@ function scheduleArduinoCommandSync() {
   }
   state.arduino.commandSyncTimeout = window.setTimeout(() => {
     state.arduino.commandSyncTimeout = null;
-    sendArduinoDebugCommand().catch((error) => {
+    sendArduinoCommand().catch((error) => {
       console.error(error);
       showArduinoError(error.message || "Le controle manuel a echoue.");
     });
@@ -602,6 +650,8 @@ function updateArduinoCommandState(command) {
     servoAngleDegrees: clampServoAngle(command.servoAngleDegrees),
     vibrationEnabled: Boolean(command.vibrationEnabled),
   };
+  // Keep local edits visible until the backend acknowledges the command.
+  state.arduino.commandDirty = true;
   syncArduinoCommandInputs(state.arduino.command);
 }
 
@@ -680,7 +730,7 @@ elements.arduinoCenterButton.addEventListener("click", () => {
     servoAngleDegrees: NEUTRAL_SERVO_ANGLE,
     vibrationEnabled: state.arduino.command.vibrationEnabled,
   });
-  sendArduinoDebugCommand().catch((error) => {
+  sendArduinoCommand().catch((error) => {
     console.error(error);
     showArduinoError(error.message || "Impossible de centrer le servo.");
   });
@@ -691,7 +741,7 @@ elements.arduinoAllStopButton.addEventListener("click", () => {
     servoAngleDegrees: NEUTRAL_SERVO_ANGLE,
     vibrationEnabled: false,
   });
-  sendArduinoDebugCommand().catch((error) => {
+  sendArduinoCommand().catch((error) => {
     console.error(error);
     showArduinoError(error.message || "Impossible d'envoyer le all stop.");
   });

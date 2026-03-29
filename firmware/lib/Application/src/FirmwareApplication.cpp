@@ -148,8 +148,7 @@ void FirmwareApplication::update(const unsigned long nowMs) {
     refreshSensors();
   }
 
-  if (transportLock_.isActiveTransport(TransportChannel::kPrimary) &&
-      telemetryInterval_.isReady(nowMs)) {
+  if (telemetryInterval_.isReady(nowMs)) {
     captureDistanceState();
     static_cast<void>(
         primaryProtocolEndpoint_.sendTelemetrySnapshot(latestSnapshot_));

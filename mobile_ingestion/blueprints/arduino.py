@@ -96,6 +96,21 @@ def set_debug_command() -> tuple[dict[str, object], int]:
   return status()
 
 
+@arduino_blueprint.put("/command")
+def set_backend_command() -> tuple[dict[str, object], int]:
+  payload = request.get_json(silent=True)
+  if not isinstance(payload, dict):
+    return jsonify({"error": "Request body must be a JSON object."}), 400
+
+  try:
+    request_dto = ArduinoCommandDto.from_mapping(payload)
+    _controller().set_backend_command(request_dto.to_command())
+  except ValueError as exc:
+    return jsonify({"error": str(exc)}), 400
+
+  return status()
+
+
 @arduino_blueprint.get("/events")
 def events() -> Response:
   controller = _controller()

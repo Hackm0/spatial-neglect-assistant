@@ -136,7 +136,11 @@ class FakeArduinoController:
 
   def list_ports(self) -> tuple[str, ...]:
     self.port_calls += 1
-    return ("/dev/ttyUSB0", "/dev/ttyUSB1")
+    return (
+        "/dev/ttyUSB0",
+        "/dev/ttyUSB1",
+        "HC-05 [98:D3:11:FD:07:FF]",
+    )
 
   def connect(self, port: str) -> None:
     self.last_port = port
@@ -279,6 +283,19 @@ def test_arduino_connect_route_returns_status_snapshot(client) -> None:
   assert payload["selectedPort"] == "/dev/ttyUSB0"
 
 
+def test_arduino_ports_route_returns_serial_and_bluetooth_targets(client) -> None:
+  response = client.get("/api/arduino/ports")
+
+  assert response.status_code == 200
+  assert response.get_json() == {
+      "ports": [
+          "/dev/ttyUSB0",
+          "/dev/ttyUSB1",
+          "HC-05 [98:D3:11:FD:07:FF]",
+      ]
+  }
+
+
 def test_arduino_debug_command_conflict_returns_409(client) -> None:
   response = client.put(
       "/api/arduino/debug/command",
@@ -290,6 +307,27 @@ def test_arduino_debug_command_conflict_returns_409(client) -> None:
 
   assert response.status_code == 409
   assert response.get_json()["error"] == "manual control unavailable"
+
+
+def test_arduino_command_route_updates_backend_command(client) -> None:
+  response = client.put(
+      "/api/arduino/command",
+      json={
+          "servoAngleDegrees": 45.0,
+          "vibrationEnabled": True,
+      },
+  )
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["backendCommand"] == {
+      "servoAngleDegrees": 45.0,
+      "vibrationEnabled": True,
+  }
+  assert payload["effectiveCommand"] == {
+      "servoAngleDegrees": 45.0,
+      "vibrationEnabled": True,
+  }
 
 
 def test_arduino_events_route_streams_sse(client) -> None:

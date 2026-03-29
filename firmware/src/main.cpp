@@ -10,7 +10,7 @@ constexpr uint8_t kJoystickXPin = A0;
 constexpr uint8_t kJoystickYPin = A1;
 constexpr uint8_t kJoystickButtonPin = 2U;
 constexpr uint8_t kServoPin = 9U;
-constexpr uint8_t kVibrationMotorPin = 12U;
+constexpr uint8_t kVibrationMotorPin = 10U;
 
 constexpr float kServoMinAngle = 0.0F;
 constexpr float kServoMaxAngle = 180.0F;
@@ -22,7 +22,8 @@ constexpr unsigned long kDistanceMeasurementIntervalMs = 60UL;
 constexpr unsigned long kDistanceEchoTimeoutUs = 30000UL;
 constexpr unsigned long kSensorSampleIntervalMs = 20UL;
 constexpr unsigned long kTelemetryIntervalMs = 50UL;
-constexpr unsigned long kCommandTimeoutMs = 500UL;
+// Allow transient link dropouts without immediately forcing failsafe.
+constexpr unsigned long kCommandTimeoutMs = 10000UL;
 constexpr unsigned long kAccelerometerRetryIntervalMs = 1000UL;
 
 ProtocolConfig makeProtocolConfig() {
