@@ -11,8 +11,16 @@ from mobile_ingestion.analyzer import AnalyzerMetrics, AnalyzerPort, SessionMeta
 from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoEvent,
                                       ArduinoSnapshot, ArduinoSubscription)
 from mobile_ingestion.config import AppConfig
-from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.dto import SessionOfferRequestDto, SessionOfferResponseDto
+from mobile_ingestion.mode_manager import (RuntimeModeEvent, RuntimeModeStatus,
+                                           RuntimeModeSubscription)
+from mobile_ingestion.object_search import (ObjectSearchEvent,
+                                            ObjectSearchStatus,
+                                            ObjectSearchSubscription)
 from mobile_ingestion.services import ServiceContainer
+from mobile_ingestion.session_manager import (SessionAuthorizationError,
+                                              SessionPermissionError,
+                                              SessionUnavailableError)
 from mobile_ingestion.voice import (TranscriptEntry, VoiceEvent,
                                     VoiceStatus, VoiceSubscription,
                                     WakeWordEvent)
@@ -53,24 +61,42 @@ class RecordingAnalyzer(AnalyzerPort):
 
 
 @dataclass
-class FakeStatus:
-  active: bool = False
-  state: str = "idle"
-  connection_state: str = "closed"
+class FakeSlotStatus:
+  role: str
+  state: str = "streaming"
+  connection_state: str = "connected"
   has_video_track: bool = False
   has_audio_track: bool = False
   error: str | None = None
 
   def to_dict(self) -> dict[str, object]:
     return {
+        "role": self.role,
         "state": self.state,
-        "active": self.active,
-        "sessionId": "fake-session" if self.active else None,
+        "active": True,
+        "sessionId": f"{self.role}-session",
         "connectionState": self.connection_state,
         "hasVideoTrack": self.has_video_track,
         "hasAudioTrack": self.has_audio_track,
         "startedAt": None,
         "error": self.error,
+    }
+
+
+@dataclass
+class FakeRoomStatus:
+  room_state: str = "idle"
+  sender: FakeSlotStatus | None = None
+  spectator: FakeSlotStatus | None = None
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "roomState": self.room_state,
+        "senderOccupied": self.sender is not None,
+        "spectatorOccupied": self.spectator is not None,
+        "senderVideoAvailable": bool(self.sender and self.sender.has_video_track),
+        "sender": self.sender.to_dict() if self.sender else None,
+        "spectator": self.spectator.to_dict() if self.spectator else None,
         "analyzerMetrics": AnalyzerMetrics().to_dict(),
     }
 
@@ -78,31 +104,72 @@ class FakeStatus:
 class FakeSessionManager:
 
   def __init__(self) -> None:
-    self.status = FakeStatus()
-    self.closed = 0
-    self.offers: list[SessionDescriptionDto] = []
+    self.status = FakeRoomStatus()
+    self.closed_tokens: list[str | None] = []
+    self.offers: list[SessionOfferRequestDto] = []
+    self.sender_token = "sender-token"
+    self.spectator_token = "spectator-token"
 
-  def accept_offer(self, offer: SessionDescriptionDto) -> SessionDescriptionDto:
+  def accept_offer(self, offer: SessionOfferRequestDto):
     self.offers.append(offer)
-    self.status = FakeStatus(
-        active=True,
-        state="streaming",
-        connection_state="connected",
-        has_video_track=True,
-        has_audio_track=True,
-        error=None,
+    if offer.role == "sender":
+      self.status = FakeRoomStatus(
+          room_state="sender_streaming",
+          sender=FakeSlotStatus(
+              role="sender",
+              has_video_track=True,
+              has_audio_track=True,
+          ),
+          spectator=self.status.spectator,
+      )
+      return SessionOfferResponseDto(
+          sdp="answer-sdp",
+          type="answer",
+          role="sender",
+          session_token=self.sender_token,
+      )
+    if not self.status.sender or not self.status.sender.has_video_track:
+      raise SessionUnavailableError(
+          "A sender with live video is required before a spectator can connect.")
+    self.status = FakeRoomStatus(
+        room_state="full",
+        sender=self.status.sender,
+        spectator=FakeSlotStatus(
+            role="spectator",
+            has_video_track=True,
+            has_audio_track=False,
+        ),
     )
-    return SessionDescriptionDto(sdp="answer-sdp", type="answer")
+    return SessionOfferResponseDto(
+        sdp="answer-sdp",
+        type="answer",
+        role="spectator",
+        session_token=self.spectator_token,
+    )
 
-  def get_status(self) -> FakeStatus:
+  def get_status(self) -> FakeRoomStatus:
     return self.status
 
-  def close_active_session(self) -> None:
-    self.closed += 1
-    self.status = FakeStatus()
+  def close_session(self, session_token: str | None) -> None:
+    self.closed_tokens.append(session_token)
+    if session_token == self.sender_token:
+      self.status = FakeRoomStatus()
+      return
+    if session_token == self.spectator_token:
+      self.status = FakeRoomStatus(
+          room_state="sender_streaming" if self.status.sender else "idle",
+          sender=self.status.sender,
+      )
+
+  def assert_sender_session(self, session_token: str | None) -> None:
+    if session_token == self.sender_token:
+      return
+    if session_token == self.spectator_token:
+      raise SessionPermissionError("Spectator sessions are read-only.")
+    raise SessionAuthorizationError("Invalid or expired session token.")
 
   def shutdown(self) -> None:
-    self.close_active_session()
+    self.close_session(self.sender_token)
 
 
 def make_snapshot(**changes: object) -> ArduinoSnapshot:
@@ -172,8 +239,14 @@ class FakeArduinoController:
     return self.snapshot
 
   def set_backend_command(self, command: ActuatorCommand) -> None:
-    effective_command = (command if not self.snapshot.debug_enabled
-                         else self.snapshot.debug_command)
+    if self.snapshot.debug_enabled:
+      effective_command = ActuatorCommand(
+          servo_angle_degrees=self.snapshot.debug_command.servo_angle_degrees,
+          vibration_enabled=(self.snapshot.debug_command.vibration_enabled
+                             or command.vibration_enabled),
+      )
+    else:
+      effective_command = command
     self.snapshot = replace(
         self.snapshot,
         backend_command=command,
@@ -181,8 +254,14 @@ class FakeArduinoController:
     )
 
   def set_debug_enabled(self, enabled: bool) -> None:
-    effective_command = (self.snapshot.debug_command
-                         if enabled else self.snapshot.backend_command)
+    if enabled:
+      effective_command = ActuatorCommand(
+          servo_angle_degrees=self.snapshot.debug_command.servo_angle_degrees,
+          vibration_enabled=(self.snapshot.debug_command.vibration_enabled
+                             or self.snapshot.backend_command.vibration_enabled),
+      )
+    else:
+      effective_command = self.snapshot.backend_command
     self.snapshot = replace(
         self.snapshot,
         debug_enabled=enabled,
@@ -266,6 +345,110 @@ class FakeVoiceProcessor:
     self.status = replace(self.status, active=False, session_id=None)
 
 
+class FakeObjectSearch:
+
+  def __init__(self) -> None:
+    detected_at = datetime.now(timezone.utc)
+    self.status = ObjectSearchStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        state="searching",
+        target_label="clés",
+        detected=False,
+        last_detected_at=detected_at,
+        error=None,
+        model_ready=True,
+        model_state="ready",
+        model_detail="Modèle vision OpenAI actif : gpt-5.4-mini.",
+        selected_vision_model="gpt-5.4-mini",
+    )
+    self.events: "queue.Queue[ObjectSearchEvent | None]" = queue.Queue()
+    self.events.put(ObjectSearchEvent("status", self.status))
+    self.events.put(None)
+
+  def start_session(self, session_id: str) -> None:
+    self.status = replace(self.status, session_id=session_id, active=True)
+
+  def submit_frame(self, frame: object) -> None:
+    del frame
+
+  def stop_session(self, session_id: str) -> None:
+    if self.status.session_id == session_id:
+      self.status = replace(self.status, session_id=None, active=False)
+
+  def snapshot(self) -> ObjectSearchStatus:
+    return self.status
+
+  def set_selected_vision_model(self, model: str) -> ObjectSearchStatus:
+    if model not in {"gpt-5.4", "gpt-5.4-mini", "gpt-4o"}:
+      raise ValueError("Unsupported object-search vision model.")
+    self.status = replace(
+        self.status,
+        model_detail=f"Modèle vision OpenAI actif : {model}.",
+        selected_vision_model=model,
+    )
+    return self.status
+
+  def subscribe(self) -> ObjectSearchSubscription:
+    return ObjectSearchSubscription(1, self.events)
+
+  def unsubscribe(self, subscription: ObjectSearchSubscription) -> None:
+    del subscription
+
+  def shutdown(self) -> None:
+    self.status = replace(self.status, active=False, session_id=None)
+
+  def cancel_active_search(self, session_id: str) -> ObjectSearchStatus:
+    if self.status.session_id == session_id:
+      self.status = replace(
+          self.status,
+          state="idle",
+          detected=False,
+          target_label=None,
+          last_detected_at=None,
+      )
+    return self.status
+
+
+class FakeRuntimeMode:
+
+  def __init__(self) -> None:
+    self.status = RuntimeModeStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        mode="idle",
+        detail="Mode idle.",
+        error=None,
+    )
+    self.events: "queue.Queue[RuntimeModeEvent | None]" = queue.Queue()
+    self.events.put(RuntimeModeEvent("status", self.status))
+    self.events.put(None)
+
+  def start_session(self, session_id: str) -> None:
+    self.status = replace(self.status, active=True, session_id=session_id)
+
+  def stop_session(self, session_id: str) -> None:
+    if self.status.session_id == session_id:
+      self.status = replace(self.status, active=False, session_id=None)
+
+  def submit_frame(self, frame: object) -> None:
+    del frame
+
+  def snapshot(self) -> RuntimeModeStatus:
+    return self.status
+
+  def subscribe(self) -> RuntimeModeSubscription:
+    return RuntimeModeSubscription(1, self.events)
+
+  def unsubscribe(self, subscription: RuntimeModeSubscription) -> None:
+    del subscription
+
+  def shutdown(self) -> None:
+    self.status = replace(self.status, active=False, session_id=None)
+
+
 @pytest.fixture
 def client():
   settings = AppConfig(testing=True)
@@ -276,6 +459,8 @@ def client():
       session_manager=FakeSessionManager(),
       arduino_controller=FakeArduinoController(),
       voice_processor=FakeVoiceProcessor(),
+      object_search=FakeObjectSearch(),
+        runtime_mode=FakeRuntimeMode(),
   )
   app = create_app(settings, services=services)
   app.config.update(TESTING=True)
@@ -291,8 +476,13 @@ def test_index_renders(client) -> None:
   assert "Connexion mobile temps réel" in body
   assert "Debug Arduino" in body
   assert "Voice debug" in body
+  assert "Recherche d'objet" in body
+  assert "Mode actif" in body
+  assert "Modèle vision" in body
+  assert "objectSearchVisionModels" in body
   assert "videoMaxFps" in body
   assert "Dernière transcription" in body
+  assert "Spectator" in body
 
 
 def test_status_route_returns_json(client) -> None:
@@ -300,8 +490,9 @@ def test_status_route_returns_json(client) -> None:
 
   assert response.status_code == 200
   payload = response.get_json()
-  assert payload["state"] == "idle"
-  assert payload["active"] is False
+  assert payload["roomState"] == "idle"
+  assert payload["senderOccupied"] is False
+  assert payload["spectatorOccupied"] is False
 
 
 def test_offer_route_returns_answer(client) -> None:
@@ -309,18 +500,60 @@ def test_offer_route_returns_answer(client) -> None:
                          json={
                              "sdp": "offer-sdp",
                              "type": "offer",
+                             "role": "sender",
                          })
 
   assert response.status_code == 200
   assert response.get_json() == {
       "sdp": "answer-sdp",
       "type": "answer",
+      "role": "sender",
+      "sessionToken": "sender-token",
   }
 
 
+def test_spectator_offer_requires_sender_video(client) -> None:
+  response = client.post("/api/webrtc/offer",
+                         json={
+                             "sdp": "offer-sdp",
+                             "type": "offer",
+                             "role": "spectator",
+                         })
+
+  assert response.status_code == 409
+  assert "sender with live video" in response.get_json()["error"]
+
+
+def test_spectator_offer_succeeds_after_sender(client) -> None:
+  sender_response = client.post("/api/webrtc/offer",
+                                json={
+                                    "sdp": "offer-sdp",
+                                    "type": "offer",
+                                    "role": "sender",
+                                })
+  assert sender_response.status_code == 200
+
+  response = client.post("/api/webrtc/offer",
+                         json={
+                             "sdp": "offer-sdp",
+                             "type": "offer",
+                             "role": "spectator",
+                         })
+
+  assert response.status_code == 200
+  assert response.get_json()["role"] == "spectator"
+  assert response.get_json()["sessionToken"] == "spectator-token"
+
+
 def test_delete_session_is_idempotent(client) -> None:
-  first_response = client.delete("/api/webrtc/session")
-  second_response = client.delete("/api/webrtc/session")
+  first_response = client.delete(
+      "/api/webrtc/session",
+      headers={"X-Session-Token": "sender-token"},
+  )
+  second_response = client.delete(
+      "/api/webrtc/session",
+      headers={"X-Session-Token": "sender-token"},
+  )
 
   assert first_response.status_code == 204
   assert second_response.status_code == 204
@@ -347,12 +580,62 @@ def test_voice_status_route_returns_json(client) -> None:
 
 
 def test_arduino_connect_route_returns_status_snapshot(client) -> None:
-  response = client.post("/api/arduino/connection", json={"port": "/dev/ttyUSB0"})
+  response = client.post(
+      "/api/arduino/connection",
+      headers={"X-Session-Token": "sender-token"},
+      json={"port": "/dev/ttyUSB0"},
+  )
 
   assert response.status_code == 200
   payload = response.get_json()
   assert payload["connected"] is True
   assert payload["selectedPort"] == "/dev/ttyUSB0"
+
+
+def test_object_search_status_route_returns_json(client) -> None:
+  response = client.get("/api/object-search/status")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["available"] is True
+  assert payload["state"] == "searching"
+  assert payload["targetLabel"] == "clés"
+  assert payload["detected"] is False
+  assert payload["modelReady"] is True
+  assert payload["modelState"] == "ready"
+  assert payload["modelDetail"] == "Modèle vision OpenAI actif : gpt-5.4-mini."
+  assert payload["selectedVisionModel"] == "gpt-5.4-mini"
+
+
+def test_object_search_vision_model_route_updates_status(client) -> None:
+  response = client.put("/api/object-search/vision-model",
+                        headers={"X-Session-Token": "sender-token"},
+                        json={"model": "gpt-5.4"})
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["modelDetail"] == "Modèle vision OpenAI actif : gpt-5.4."
+  assert payload["selectedVisionModel"] == "gpt-5.4"
+
+
+def test_object_search_vision_model_route_rejects_invalid_models(client) -> None:
+  response = client.put("/api/object-search/vision-model",
+                        headers={"X-Session-Token": "sender-token"},
+                        json={"model": "owlv2"})
+
+  assert response.status_code == 400
+  assert "Unsupported object-search vision model." in response.get_json()["error"]
+
+
+def test_spectator_cannot_change_vision_model(client) -> None:
+  response = client.put(
+      "/api/object-search/vision-model",
+      headers={"X-Session-Token": "spectator-token"},
+      json={"model": "gpt-5.4"},
+  )
+
+  assert response.status_code == 403
+  assert response.get_json()["error"] == "Spectator sessions are read-only."
 
 
 def test_arduino_ports_route_returns_serial_and_bluetooth_targets(client) -> None:
@@ -371,6 +654,7 @@ def test_arduino_ports_route_returns_serial_and_bluetooth_targets(client) -> Non
 def test_arduino_debug_command_conflict_returns_409(client) -> None:
   response = client.put(
       "/api/arduino/debug/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 45.0,
           "vibrationEnabled": True,
@@ -381,9 +665,24 @@ def test_arduino_debug_command_conflict_returns_409(client) -> None:
   assert response.get_json()["error"] == "manual control unavailable"
 
 
+def test_spectator_cannot_send_arduino_commands(client) -> None:
+  response = client.put(
+      "/api/arduino/command",
+      headers={"X-Session-Token": "spectator-token"},
+      json={
+          "servoAngleDegrees": 45.0,
+          "vibrationEnabled": True,
+      },
+  )
+
+  assert response.status_code == 403
+  assert response.get_json()["error"] == "Spectator sessions are read-only."
+
+
 def test_arduino_command_route_updates_backend_command(client) -> None:
   response = client.put(
       "/api/arduino/command",
+      headers={"X-Session-Token": "sender-token"},
       json={
           "servoAngleDegrees": 45.0,
           "vibrationEnabled": True,
@@ -398,6 +697,65 @@ def test_arduino_command_route_updates_backend_command(client) -> None:
   }
   assert payload["effectiveCommand"] == {
       "servoAngleDegrees": 45.0,
+      "vibrationEnabled": True,
+  }
+
+def test_arduino_backend_vibration_affects_effective_command_when_debug_enabled(
+    client) -> None:
+  debug_response = client.put(
+      "/api/arduino/debug",
+      headers={"X-Session-Token": "sender-token"},
+      json={"enabled": True},
+  )
+  assert debug_response.status_code == 200
+
+  debug_command_response = client.put(
+      "/api/arduino/debug/command",
+      headers={"X-Session-Token": "sender-token"},
+      json={
+          "servoAngleDegrees": 15.0,
+          "vibrationEnabled": False,
+      },
+  )
+  assert debug_command_response.status_code == 409
+
+  connect_response = client.post("/api/arduino/connection",
+                                 headers={"X-Session-Token": "sender-token"},
+                                 json={"port": "/dev/ttyUSB0"})
+  assert connect_response.status_code == 200
+
+  debug_command_response = client.put(
+      "/api/arduino/debug/command",
+      headers={"X-Session-Token": "sender-token"},
+      json={
+          "servoAngleDegrees": 15.0,
+          "vibrationEnabled": False,
+      },
+  )
+  assert debug_command_response.status_code == 200
+
+  backend_command_response = client.put(
+      "/api/arduino/command",
+      headers={"X-Session-Token": "sender-token"},
+      json={
+          "servoAngleDegrees": 120.0,
+          "vibrationEnabled": True,
+      },
+  )
+
+  assert backend_command_response.status_code == 200
+  payload = backend_command_response.get_json()
+  assert payload["debugEnabled"] is True
+  assert payload["debugCommand"] == {
+      "servoAngleDegrees": 15.0,
+      "vibrationEnabled": False,
+  }
+  assert payload["backendCommand"] == {
+      "servoAngleDegrees": 120.0,
+      "vibrationEnabled": True,
+  }
+  assert payload["effectiveCommand"] == {
+      "servoAngleDegrees": 15.0,
       "vibrationEnabled": True,
   }
 
@@ -418,3 +776,31 @@ def test_voice_events_route_streams_sse(client) -> None:
   assert response.status_code == 200
   assert b"event: status" in body
   assert b"modeState" in body
+
+
+def test_object_search_events_route_streams_sse(client) -> None:
+  response = client.get("/api/object-search/events")
+  body = b"".join(response.response)
+
+  assert response.status_code == 200
+  assert b"event: status" in body
+  assert "targetLabel".encode("utf-8") in body
+  assert b"modelReady" in body
+
+
+def test_mode_status_route_returns_json(client) -> None:
+  response = client.get("/api/mode/status")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["available"] is True
+  assert payload["mode"] == "idle"
+
+
+def test_mode_events_route_streams_sse(client) -> None:
+  response = client.get("/api/mode/events")
+  body = b"".join(response.response)
+
+  assert response.status_code == 200
+  assert b"event: status" in body
+  assert b"\"mode\": \"idle\"" in body

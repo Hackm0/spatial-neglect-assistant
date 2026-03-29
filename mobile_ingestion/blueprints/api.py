@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from flask import Blueprint, current_app, jsonify, request
 
-from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.dto import SessionOfferRequestDto
 from mobile_ingestion.session_manager import (InvalidSessionError,
-                                              SessionBusyError)
+                                              SESSION_TOKEN_HEADER,
+                                              SessionBusyError,
+                                              SessionUnavailableError)
 
 
 api_blueprint = Blueprint("api", __name__, url_prefix="/api/webrtc")
@@ -23,13 +25,15 @@ def offer() -> tuple[dict[str, object], int]:
     return jsonify({"error": "Request body must be a JSON object."}), 400
 
   try:
-    offer_dto = SessionDescriptionDto.from_mapping(payload)
+    offer_dto = SessionOfferRequestDto.from_mapping(payload)
     answer = current_app.extensions[
         "mobile_ingestion.services"].session_manager.accept_offer(offer_dto)
   except ValueError as exc:
     return jsonify({"error": str(exc)}), 400
   except InvalidSessionError as exc:
     return jsonify({"error": str(exc)}), 400
+  except SessionUnavailableError as exc:
+    return jsonify({"error": str(exc)}), 409
   except SessionBusyError as exc:
     return jsonify({"error": str(exc)}), 409
   except RuntimeError as exc:
@@ -41,6 +45,6 @@ def offer() -> tuple[dict[str, object], int]:
 
 @api_blueprint.delete("/session")
 def close_session() -> tuple[str, int]:
-  current_app.extensions["mobile_ingestion.services"].session_manager.close_active_session(
-  )
+  current_app.extensions["mobile_ingestion.services"].session_manager.close_session(
+      request.headers.get(SESSION_TOKEN_HEADER))
   return "", 204

@@ -184,6 +184,31 @@ def test_debug_override_precedence_reverts_to_backend_command() -> None:
   controller.disconnect()
 
 
+def test_backend_vibration_remains_active_in_debug_mode() -> None:
+  fake_port = FakeSerialPort()
+  fake_port.queue_bytes(build_telemetry_frame(sequence=1))
+  controller = build_controller(fake_port)
+
+  controller.connect("/dev/ttyUSB0")
+  wait_until(lambda: controller.get_snapshot().connected)
+
+  controller.set_debug_enabled(True)
+  controller.set_debug_command(ActuatorCommand(30.0, False))
+  wait_until(lambda: decode_last_command(fake_port.writes[-1]) == (30.0, False))
+
+  controller.set_backend_command(ActuatorCommand(120.0, True))
+  wait_until(lambda: decode_last_command(fake_port.writes[-1]) == (30.0, True))
+  assert controller.get_snapshot().effective_command == ActuatorCommand(30.0,
+                                                                        True)
+
+  controller.set_backend_command(ActuatorCommand(120.0, False))
+  wait_until(lambda: decode_last_command(fake_port.writes[-1]) == (30.0, False))
+  assert controller.get_snapshot().effective_command == ActuatorCommand(30.0,
+                                                                        False)
+
+  controller.disconnect()
+
+
 @pytest.mark.parametrize(
     ("port_input", "expected_channel"),
     (

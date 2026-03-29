@@ -3,16 +3,34 @@ const SERVO_MIN_ANGLE = 0;
 const SERVO_MAX_ANGLE = 180;
 const NEUTRAL_SERVO_ANGLE = 90;
 const DEFAULT_MAX_VIDEO_FPS = 5;
+const SESSION_TOKEN_HEADER = "X-Session-Token";
+const SESSION_ROLE_SENDER = "sender";
+const SESSION_ROLE_SPECTATOR = "spectator";
 const VOICE_STATUS_POLL_INTERVAL_MS = 2000;
 const VOICE_EVENT_RECONNECT_DELAY_MS = 1500;
+const OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS = 2000;
+const OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS = 1500;
+const MODE_STATUS_POLL_INTERVAL_MS = 2000;
+const MODE_EVENT_RECONNECT_DELAY_MS = 1500;
+const JOYSTICK_X_MIN_PERMILLE = -1000;
+const JOYSTICK_X_MAX_PERMILLE = 1000;
+const OBJECT_SEARCH_LINE_MIN_RATIO = 1 / 3;
+const OBJECT_SEARCH_LINE_MAX_RATIO = 2 / 3;
 
 const elements = {
   connectButton: document.getElementById("connect-button"),
   disconnectButton: document.getElementById("disconnect-button"),
+  roleSelect: document.getElementById("role-select"),
+  cameraSelect: document.getElementById("camera-select"),
+  refreshCamerasButton: document.getElementById("refresh-cameras-button"),
   errorMessage: document.getElementById("error-message"),
   preview: document.getElementById("local-preview"),
+  objectSearchUnusedZone: document.getElementById("object-search-unused-zone"),
+  objectSearchGuideLine: document.getElementById("object-search-guide-line"),
   statusBadge: document.getElementById("status-badge"),
   statusDetail: document.getElementById("status-detail"),
+  activeModeBadge: document.getElementById("active-mode-badge"),
+  activeModeDetail: document.getElementById("active-mode-detail"),
   voiceDebugToggleButton: document.getElementById("voice-debug-toggle-button"),
   voiceDebugPanel: document.getElementById("voice-debug-panel"),
   voiceDebugBadge: document.getElementById("voice-debug-badge"),
@@ -26,6 +44,20 @@ const elements = {
   voiceLastWakeWord: document.getElementById("voice-last-wake-word"),
   voiceLastEntryId: document.getElementById("voice-last-entry-id"),
   voiceTranscriptLog: document.getElementById("voice-transcript-log"),
+  objectSearchBadge: document.getElementById("object-search-badge"),
+  objectSearchDetail: document.getElementById("object-search-detail"),
+  objectSearchTarget: document.getElementById("object-search-target"),
+    objectSearchModelDetailRow: document.getElementById(
+      "object-search-model-detail-row")
+      || document.getElementById("object-search-model-detail")?.closest("p"),
+  objectSearchModelDetail: document.getElementById("object-search-model-detail"),
+    objectSearchModelControls: document.getElementById("object-search-model-controls")
+      || document.querySelector(".object-search-model-controls"),
+  objectSearchVisionModelSelect: document.getElementById(
+      "object-search-vision-model-select"),
+  objectSearchModelUpdateStatus: document.getElementById(
+      "object-search-model-update-status"),
+  objectSearchErrorMessage: document.getElementById("object-search-error-message"),
   debugToggleButton: document.getElementById("debug-toggle-button"),
   arduinoDebugPanel: document.getElementById("arduino-debug-panel"),
   arduinoDebugBadge: document.getElementById("arduino-debug-badge"),
@@ -63,8 +95,18 @@ const elements = {
 
 const state = {
   localStream: null,
+  remoteStream: null,
   peerConnection: null,
+  roomStatus: null,
+  requestedRole: SESSION_ROLE_SENDER,
+  connectedRole: null,
+  sessionToken: null,
   statusInterval: null,
+  camera: {
+    availableDevices: [],
+    selectedDeviceId: "",
+    switching: false,
+  },
   voice: {
     debugVisible: false,
     eventSource: null,
@@ -76,6 +118,20 @@ const state = {
     transcriptEntries: [],
     lastTranscriptReceivedAt: null,
     lastWakeWord: null,
+  },
+  objectSearch: {
+    eventSource: null,
+    statusInterval: null,
+    reconnectTimeout: null,
+    status: null,
+    modelUpdateInFlight: false,
+    joystickYPermille: null,
+  },
+  mode: {
+    eventSource: null,
+    statusInterval: null,
+    reconnectTimeout: null,
+    status: null,
   },
   arduino: {
     debugVisible: false,
@@ -125,6 +181,49 @@ function clearVoiceError() {
   clearMessage(elements.voiceErrorMessage);
 }
 
+function showObjectSearchError(message) {
+  showMessage(elements.objectSearchErrorMessage, message);
+}
+
+function clearObjectSearchError() {
+  clearMessage(elements.objectSearchErrorMessage);
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function computeObjectSearchLineRatio(joystickPermille) {
+  const safeJoystick = Number.isFinite(joystickPermille)
+    ? clamp(Number(joystickPermille), JOYSTICK_X_MIN_PERMILLE, JOYSTICK_X_MAX_PERMILLE)
+    : 0;
+  const normalized = (safeJoystick - JOYSTICK_X_MIN_PERMILLE)
+    / (JOYSTICK_X_MAX_PERMILLE - JOYSTICK_X_MIN_PERMILLE);
+  return OBJECT_SEARCH_LINE_MIN_RATIO
+    + ((OBJECT_SEARCH_LINE_MAX_RATIO - OBJECT_SEARCH_LINE_MIN_RATIO) * normalized);
+}
+
+function renderObjectSearchGuideLine() {
+  if (!elements.objectSearchGuideLine) {
+    return;
+  }
+  if (elements.objectSearchUnusedZone) {
+    elements.objectSearchUnusedZone.hidden = false;
+    elements.objectSearchUnusedZone.removeAttribute("hidden");
+    elements.objectSearchUnusedZone.style.display = "block";
+  }
+  elements.objectSearchGuideLine.hidden = false;
+  elements.objectSearchGuideLine.removeAttribute("hidden");
+  elements.objectSearchGuideLine.style.display = "block";
+
+  const lineRatio = computeObjectSearchLineRatio(state.objectSearch.joystickYPermille);
+  const linePercent = `${(lineRatio * 100).toFixed(2)}%`;
+  elements.objectSearchGuideLine.style.left = linePercent;
+  if (elements.objectSearchUnusedZone) {
+    elements.objectSearchUnusedZone.style.left = linePercent;
+  }
+}
+
 function showArduinoError(message) {
   showMessage(elements.arduinoErrorMessage, message);
 }
@@ -136,6 +235,66 @@ function clearArduinoError() {
 function setBusy(isBusy) {
   elements.connectButton.disabled = isBusy;
   elements.disconnectButton.disabled = !isBusy;
+  elements.roleSelect.disabled = isBusy;
+  updateCameraControls();
+}
+
+function selectedRole() {
+  return elements.roleSelect.value || SESSION_ROLE_SENDER;
+}
+
+function selectedCameraDeviceId() {
+  return elements.cameraSelect?.value || "";
+}
+
+function shouldEnableCameraControls() {
+  const activeRole = state.connectedRole || state.requestedRole || selectedRole();
+  const senderActive = activeRole === SESSION_ROLE_SENDER;
+  if (!senderActive) {
+    return false;
+  }
+  return !state.camera.switching;
+}
+
+function updateCameraControls() {
+  const disabled = !shouldEnableCameraControls();
+  if (elements.cameraSelect) {
+    elements.cameraSelect.disabled = disabled;
+  }
+  if (elements.refreshCamerasButton) {
+    elements.refreshCamerasButton.disabled = disabled;
+  }
+}
+
+function hasSenderPrivileges() {
+  return state.connectedRole === SESSION_ROLE_SENDER
+    && typeof state.sessionToken === "string"
+    && state.sessionToken.length > 0;
+}
+
+function isSpectatorSession() {
+  return state.connectedRole === SESSION_ROLE_SPECTATOR;
+}
+
+function isSpectatorView() {
+  const activeRole = state.connectedRole || state.requestedRole || selectedRole();
+  return activeRole === SESSION_ROLE_SPECTATOR;
+}
+
+function buildFetchOptions(options = {}) {
+  const {
+    includeSessionToken = false,
+    headers: rawHeaders,
+    ...fetchOptions
+  } = options;
+  const headers = new Headers(rawHeaders || {});
+  if (includeSessionToken && state.sessionToken) {
+    headers.set(SESSION_TOKEN_HEADER, state.sessionToken);
+  }
+  return {
+    ...fetchOptions,
+    headers,
+  };
 }
 
 function clampServoAngle(value) {
@@ -174,10 +333,15 @@ function getConfiguredVideoMaxFps() {
   return configuredValue;
 }
 
-function buildVideoConstraints() {
+function buildVideoConstraints(deviceId = "") {
   const maxFps = getConfiguredVideoMaxFps();
+  const preferredDeviceId = String(deviceId || "").trim();
+  const cameraSelector = preferredDeviceId
+    ? { deviceId: { exact: preferredDeviceId } }
+    : { facingMode: { ideal: "environment" } };
+
   return {
-    facingMode: { ideal: "environment" },
+    ...cameraSelector,
     width: { ideal: 1280 },
     height: { ideal: 720 },
     frameRate: {
@@ -199,6 +363,124 @@ async function enforceVideoTrackConstraints(stream) {
     });
   } catch (error) {
     console.warn("Impossible de limiter la cadence video.", error);
+  }
+}
+
+function getPreferredCameraDeviceId(videoDevices) {
+  if (!Array.isArray(videoDevices) || videoDevices.length === 0) {
+    return "";
+  }
+  const labelledDevices = videoDevices.map((device) => {
+    const normalizedLabel = String(device.label || "").toLowerCase();
+    return {
+      device,
+      normalizedLabel,
+    };
+  });
+  const preferredPatterns = [
+    "ultra",
+    "wide",
+    "grand angle",
+    "rear",
+    "back",
+    "environment",
+    "arriere",
+  ];
+  const preferredEntry = labelledDevices.find((entry) => preferredPatterns.some(
+      (pattern) => entry.normalizedLabel.includes(pattern),
+  ));
+  if (preferredEntry) {
+    return preferredEntry.device.deviceId;
+  }
+  return videoDevices[0].deviceId;
+}
+
+function renderCameraOptions(videoDevices) {
+  if (!elements.cameraSelect) {
+    return;
+  }
+
+  const currentSelection = selectedCameraDeviceId();
+  const knownSelection = state.camera.selectedDeviceId;
+  elements.cameraSelect.innerHTML = "";
+
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = "Caméra par défaut (arrière si possible)";
+  elements.cameraSelect.append(defaultOption);
+
+  videoDevices.forEach((device, index) => {
+    const option = document.createElement("option");
+    option.value = device.deviceId;
+    option.textContent = device.label || `Caméra ${index + 1}`;
+    elements.cameraSelect.append(option);
+  });
+
+  const preferredSelection = currentSelection
+    || knownSelection
+    || getPreferredCameraDeviceId(videoDevices)
+    || "";
+  elements.cameraSelect.value = preferredSelection;
+  state.camera.selectedDeviceId = elements.cameraSelect.value || "";
+}
+
+async function refreshCameraDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    return;
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const videoDevices = devices.filter((device) => device.kind === "videoinput");
+  state.camera.availableDevices = videoDevices;
+  renderCameraOptions(videoDevices);
+  updateCameraControls();
+}
+
+async function switchCameraTrackIfNeeded() {
+  if (state.connectedRole !== SESSION_ROLE_SENDER
+      || !state.peerConnection
+      || !state.localStream) {
+    return;
+  }
+
+  const requestedDeviceId = selectedCameraDeviceId();
+  const currentVideoTrack = state.localStream.getVideoTracks()[0];
+  const currentDeviceId = currentVideoTrack?.getSettings?.().deviceId || "";
+  if (requestedDeviceId === currentDeviceId) {
+    return;
+  }
+
+  state.camera.switching = true;
+  updateCameraControls();
+  setStatus("Caméra", "Bascule vers la caméra sélectionnée...");
+
+  try {
+    const replacementStream = await requestLocalStream(requestedDeviceId);
+    const [replacementAudioTrack] = replacementStream.getAudioTracks();
+    const [replacementVideoTrack] = replacementStream.getVideoTracks();
+    if (!replacementAudioTrack || !replacementVideoTrack) {
+      throw new Error("Le flux caméra de remplacement est incomplet.");
+    }
+
+    const audioSender = state.peerConnection.getSenders().find(
+        (sender) => sender.track?.kind === "audio",
+    );
+    const videoSender = state.peerConnection.getSenders().find(
+        (sender) => sender.track?.kind === "video",
+    );
+    await Promise.all([
+      audioSender?.replaceTrack(replacementAudioTrack),
+      videoSender?.replaceTrack(replacementVideoTrack),
+    ]);
+
+    state.localStream.getTracks().forEach((track) => track.stop());
+    state.localStream = replacementStream;
+    elements.preview.srcObject = replacementStream;
+    state.camera.selectedDeviceId = selectedCameraDeviceId();
+    setStatus("Sender", "Caméra active mise à jour.");
+  } finally {
+    state.camera.switching = false;
+    updateCameraControls();
   }
 }
 
@@ -255,6 +537,442 @@ function updateVoiceDebugVisibility() {
 
 function shouldMaintainVoiceMonitoring() {
   return state.peerConnection !== null || state.localStream !== null;
+}
+
+function shouldMaintainObjectSearchMonitoring() {
+  return state.peerConnection !== null || state.localStream !== null;
+}
+
+function getConfiguredObjectSearchVisionModels() {
+  const configuredModels = window.APP_CONFIG?.objectSearchVisionModels;
+  if (!Array.isArray(configuredModels)) {
+    return [];
+  }
+  return configuredModels.filter((model) => typeof model === "string" && model);
+}
+
+function setObjectSearchModelSelectorEnabled(isEnabled) {
+  elements.objectSearchVisionModelSelect.disabled = !isEnabled;
+}
+
+function showObjectSearchModelUpdateStatus(message) {
+  showMessage(elements.objectSearchModelUpdateStatus, message);
+}
+
+function clearObjectSearchModelUpdateStatus() {
+  clearMessage(elements.objectSearchModelUpdateStatus);
+}
+
+function updateProtectedControls() {
+  const canControl = hasSenderPrivileges();
+  const spectatorView = isSpectatorView();
+
+  if (elements.objectSearchModelDetailRow) {
+    elements.objectSearchModelDetailRow.hidden = spectatorView;
+    elements.objectSearchModelDetailRow.style.display = spectatorView ? "none" : "";
+  }
+  if (elements.objectSearchModelControls) {
+    elements.objectSearchModelControls.hidden = spectatorView;
+    elements.objectSearchModelControls.style.display = spectatorView ? "none" : "";
+  }
+  setObjectSearchModelSelectorEnabled(
+      canControl
+      && !spectatorView
+      && getConfiguredObjectSearchVisionModels().length > 0
+      && !state.objectSearch.modelUpdateInFlight,
+  );
+  updateArduinoDebugVisibility();
+  if (state.arduino.status) {
+    applyArduinoStatus(state.arduino.status, { forceCommandSync: true });
+  } else {
+    setArduinoManualControlsEnabled(false);
+    elements.arduinoConnectButton.disabled = !canControl;
+    elements.arduinoDisconnectButton.disabled = !canControl;
+  }
+  updateCameraControls();
+}
+
+function syncObjectSearchVisionModelSelector(status) {
+  const selectedModel = status?.selectedVisionModel
+    || window.APP_CONFIG?.objectSearchVisionModel
+    || "";
+  if (!selectedModel) {
+    return;
+  }
+  elements.objectSearchVisionModelSelect.value = selectedModel;
+}
+
+function renderObjectSearchVisionModelOptions() {
+  const models = getConfiguredObjectSearchVisionModels();
+  elements.objectSearchVisionModelSelect.innerHTML = "";
+
+  models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    elements.objectSearchVisionModelSelect.append(option);
+  });
+
+  syncObjectSearchVisionModelSelector(state.objectSearch.status);
+  updateProtectedControls();
+}
+
+function setObjectSearchBadge(label, stateName) {
+  elements.objectSearchBadge.textContent = label;
+  elements.objectSearchBadge.dataset.state = stateName;
+}
+
+function buildObjectSearchDetail(status) {
+  if (!status) {
+    return "Connecte le flux mobile pour activer la recherche d'objet.";
+  }
+  if (!status.available) {
+    return status.error || "La recherche d'objet est indisponible sur le serveur.";
+  }
+  const hasPendingTarget = Boolean(status.targetLabel) && !status.detected;
+  const modelPreparing = status.active
+    && !status.modelReady
+    && (status.modelState === "loading" || status.modelState === "pending");
+  if (modelPreparing && !hasPendingTarget) {
+    return "Préparation du modèle vision...";
+  }
+  if (hasPendingTarget && !status.modelReady) {
+    return status.targetLabel
+      ? `Le modèle vision se prépare pour chercher « ${status.targetLabel} ».`
+      : "Le modèle vision se prépare pour la recherche d'objet.";
+  }
+  if (hasPendingTarget) {
+    return status.targetLabel
+      ? `Je cherche « ${status.targetLabel} » dans le champ de la caméra.`
+      : "Recherche d'objet en cours.";
+  }
+  if (status.state === "awaiting_request") {
+    return "Quelle cible dois-je chercher ?";
+  }
+  if (status.state === "resolving_target") {
+    return "Analyse de la demande vocale...";
+  }
+  if (status.state === "found") {
+    return status.targetLabel
+      ? `« ${status.targetLabel} » est visible dans le champ de la caméra.`
+      : "Objet détecté dans le champ de la caméra.";
+  }
+  if (status.state === "error") {
+    return status.error || "La recherche d'objet a rencontré une erreur.";
+  }
+  if (status.active) {
+    return "Dites « jarvis », puis demandez l'objet à trouver.";
+  }
+  return "Connecte le flux mobile pour activer la recherche d'objet.";
+}
+
+function buildObjectSearchModelDetail(status) {
+  if (!status) {
+    return "--";
+  }
+  if (typeof status.modelDetail === "string" && status.modelDetail) {
+    return status.modelDetail;
+  }
+  if (status.modelReady) {
+    return "Le modèle vision est prêt.";
+  }
+  if (status.modelState === "loading") {
+    return "Téléchargement / chargement du modèle vision en cours...";
+  }
+  if (status.modelState === "unavailable") {
+    return "Le modèle vision est indisponible.";
+  }
+  if (status.modelState === "error") {
+    return "Le modèle vision a rencontré une erreur.";
+  }
+  return "Le modèle vision n'est pas encore chargé.";
+}
+
+function applyObjectSearchStatus(status) {
+  state.objectSearch.status = status;
+  if (typeof status.selectedVisionModel === "string" && status.selectedVisionModel) {
+    window.APP_CONFIG.objectSearchVisionModel = status.selectedVisionModel;
+  }
+  elements.objectSearchTarget.textContent = status.targetLabel || "--";
+  elements.objectSearchDetail.textContent = buildObjectSearchDetail(status);
+  elements.objectSearchModelDetail.textContent = buildObjectSearchModelDetail(status);
+  syncObjectSearchVisionModelSelector(status);
+  updateProtectedControls();
+  const hasPendingTarget = Boolean(status.targetLabel) && !status.detected;
+
+  let badgeLabel = "Inactif";
+  let badgeState = status.state || "idle";
+  if (!status.available) {
+    badgeLabel = "Indisponible";
+    badgeState = "unavailable";
+  } else if (status.detected || status.state === "found") {
+    badgeLabel = "Détecté";
+    badgeState = "found";
+  } else if (status.active && !status.modelReady
+      && (status.modelState === "loading" || status.modelState === "pending")) {
+    badgeLabel = "Chargement";
+    badgeState = "loading";
+  } else if (hasPendingTarget) {
+    badgeLabel = "Recherche";
+    badgeState = "searching";
+  } else if (status.state === "awaiting_request") {
+    badgeLabel = "À l'écoute";
+  } else if (status.state === "resolving_target") {
+    badgeLabel = "Analyse";
+  } else if (status.state === "error") {
+    badgeLabel = "Erreur";
+  } else if (status.active && status.modelReady) {
+    badgeLabel = "Prêt";
+    badgeState = "ready";
+  }
+  setObjectSearchBadge(badgeLabel, badgeState);
+
+  if (status.error && (status.state === "error" || !status.available)) {
+    showObjectSearchError(status.error);
+  } else {
+    clearObjectSearchError();
+  }
+}
+
+async function fetchObjectSearchStatus() {
+  const payload = await requestJson("/api/object-search/status");
+  applyObjectSearchStatus(payload);
+}
+
+async function updateObjectSearchVisionModel(model) {
+  if (!hasSenderPrivileges()) {
+    showObjectSearchError(
+        "Connecte-toi comme sender pour changer le modele vision.",
+    );
+    elements.objectSearchVisionModelSelect.value = (
+      state.objectSearch.status?.selectedVisionModel
+      || window.APP_CONFIG?.objectSearchVisionModel
+      || ""
+    );
+    return;
+  }
+  const fallbackModel = state.objectSearch.status?.selectedVisionModel
+    || window.APP_CONFIG?.objectSearchVisionModel
+    || "";
+  state.objectSearch.modelUpdateInFlight = true;
+  showObjectSearchModelUpdateStatus(`Application du modèle ${model}...`);
+  setObjectSearchModelSelectorEnabled(false);
+  clearObjectSearchError();
+
+  try {
+    const payload = await requestJson("/api/object-search/vision-model", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model }),
+      includeSessionToken: true,
+    });
+    state.objectSearch.modelUpdateInFlight = false;
+    window.APP_CONFIG.objectSearchVisionModel = payload.selectedVisionModel || model;
+    clearObjectSearchModelUpdateStatus();
+    applyObjectSearchStatus(payload);
+  } catch (error) {
+    state.objectSearch.modelUpdateInFlight = false;
+    elements.objectSearchVisionModelSelect.value = fallbackModel;
+    showObjectSearchError(
+        error.message || "Impossible de changer le modèle vision.",
+    );
+    showObjectSearchModelUpdateStatus(
+        "Le changement de modèle a échoué.",
+    );
+    updateProtectedControls();
+    throw error;
+  }
+}
+
+function clearObjectSearchReconnectTimer() {
+  if (state.objectSearch.reconnectTimeout !== null) {
+    window.clearTimeout(state.objectSearch.reconnectTimeout);
+    state.objectSearch.reconnectTimeout = null;
+  }
+}
+
+function scheduleObjectSearchEventStreamReconnect() {
+  if (state.objectSearch.reconnectTimeout !== null
+      || !shouldMaintainObjectSearchMonitoring()) {
+    return;
+  }
+
+  state.objectSearch.reconnectTimeout = window.setTimeout(() => {
+    state.objectSearch.reconnectTimeout = null;
+    if (!shouldMaintainObjectSearchMonitoring()) {
+      return;
+    }
+    openObjectSearchEventStream();
+  }, OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS);
+}
+
+function closeObjectSearchEventStream() {
+  if (state.objectSearch.eventSource) {
+    state.objectSearch.eventSource.close();
+    state.objectSearch.eventSource = null;
+  }
+}
+
+function openObjectSearchEventStream() {
+  if (!shouldMaintainObjectSearchMonitoring()) {
+    return;
+  }
+
+  closeObjectSearchEventStream();
+  const eventSource = new EventSource("/api/object-search/events");
+  state.objectSearch.eventSource = eventSource;
+
+  eventSource.addEventListener("status", (event) => {
+    const payload = JSON.parse(event.data);
+    applyObjectSearchStatus(payload);
+    clearObjectSearchReconnectTimer();
+  });
+
+  eventSource.addEventListener("error", () => {
+    if (state.objectSearch.eventSource !== eventSource) {
+      return;
+    }
+    closeObjectSearchEventStream();
+    scheduleObjectSearchEventStreamReconnect();
+    fetchObjectSearchStatus().catch((error) => {
+      console.error(error);
+    });
+  });
+}
+
+function startObjectSearchStatusPolling() {
+  stopObjectSearchStatusPolling();
+  state.objectSearch.statusInterval = window.setInterval(() => {
+    fetchObjectSearchStatus().catch((error) => {
+      console.error(error);
+      showObjectSearchError(
+          "Impossible de récupérer le statut de recherche d'objet.",
+      );
+    });
+  }, OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS);
+}
+
+function stopObjectSearchStatusPolling() {
+  if (state.objectSearch.statusInterval !== null) {
+    window.clearInterval(state.objectSearch.statusInterval);
+    state.objectSearch.statusInterval = null;
+  }
+}
+
+function resetObjectSearchState() {
+  clearObjectSearchReconnectTimer();
+  state.objectSearch.status = null;
+  state.objectSearch.modelUpdateInFlight = false;
+  elements.objectSearchTarget.textContent = "--";
+  elements.objectSearchModelDetail.textContent = "--";
+  elements.objectSearchDetail.textContent =
+    "Connecte le flux mobile pour activer la recherche d'objet.";
+  setObjectSearchBadge("Inactif", "idle");
+  syncObjectSearchVisionModelSelector(null);
+  clearObjectSearchModelUpdateStatus();
+  updateProtectedControls();
+  clearObjectSearchError();
+  renderObjectSearchGuideLine();
+}
+
+function getModeLabel(mode) {
+  if (mode === "eating") {
+    return "Eating";
+  }
+  if (mode === "writing") {
+    return "Writing";
+  }
+  if (mode === "object_search") {
+    return "Object Search";
+  }
+  return "Idle";
+}
+
+function applyModeStatus(status) {
+  state.mode.status = status;
+  const mode = status?.mode || "idle";
+  elements.activeModeBadge.textContent = getModeLabel(mode);
+  elements.activeModeBadge.dataset.state = mode;
+  elements.activeModeDetail.textContent = (
+    status?.detail
+    || (mode === "object_search"
+      ? "Recherche d'objet en cours."
+      : (mode === "eating"
+        ? "Mode repas actif."
+        : (mode === "writing" ? "Mode ecriture actif." : "Mode idle.")))
+  );
+  renderObjectSearchGuideLine();
+}
+
+async function fetchModeStatus() {
+  const payload = await requestJson("/api/mode/status");
+  applyModeStatus(payload);
+}
+
+function clearModeReconnectTimer() {
+  if (state.mode.reconnectTimeout !== null) {
+    window.clearTimeout(state.mode.reconnectTimeout);
+    state.mode.reconnectTimeout = null;
+  }
+}
+
+function scheduleModeEventStreamReconnect() {
+  if (state.mode.reconnectTimeout !== null) {
+    return;
+  }
+
+  state.mode.reconnectTimeout = window.setTimeout(() => {
+    state.mode.reconnectTimeout = null;
+    openModeEventStream();
+  }, MODE_EVENT_RECONNECT_DELAY_MS);
+}
+
+function closeModeEventStream() {
+  if (state.mode.eventSource) {
+    state.mode.eventSource.close();
+    state.mode.eventSource = null;
+  }
+}
+
+function openModeEventStream() {
+  closeModeEventStream();
+  const eventSource = new EventSource("/api/mode/events");
+  state.mode.eventSource = eventSource;
+
+  eventSource.addEventListener("status", (event) => {
+    const payload = JSON.parse(event.data);
+    applyModeStatus(payload);
+    clearModeReconnectTimer();
+  });
+
+  eventSource.addEventListener("error", () => {
+    if (state.mode.eventSource !== eventSource) {
+      return;
+    }
+    closeModeEventStream();
+    scheduleModeEventStreamReconnect();
+    fetchModeStatus().catch((error) => {
+      console.error(error);
+    });
+  });
+}
+
+function startModeStatusPolling() {
+  stopModeStatusPolling();
+  state.mode.statusInterval = window.setInterval(() => {
+    fetchModeStatus().catch((error) => {
+      console.error(error);
+    });
+  }, MODE_STATUS_POLL_INTERVAL_MS);
+}
+
+function stopModeStatusPolling() {
+  if (state.mode.statusInterval !== null) {
+    window.clearInterval(state.mode.statusInterval);
+    state.mode.statusInterval = null;
+  }
 }
 
 function renderVoiceTransportDetail() {
@@ -379,6 +1097,9 @@ function ensureVoiceAudioContext() {
 }
 
 function playWakeWordTone() {
+  if (isSpectatorSession()) {
+    return;
+  }
   ensureVoiceAudioContext();
   if (!state.voice.audioContext) {
     return;
@@ -535,11 +1256,12 @@ function resetVoiceState() {
 }
 
 function setArduinoManualControlsEnabled(isEnabled) {
-  elements.arduinoServoRange.disabled = !isEnabled;
-  elements.arduinoServoNumber.disabled = !isEnabled;
-  elements.arduinoVibrationToggle.disabled = !isEnabled;
-  elements.arduinoCenterButton.disabled = !isEnabled;
-  elements.arduinoAllStopButton.disabled = !isEnabled;
+  const controlsEnabled = isEnabled && hasSenderPrivileges();
+  elements.arduinoServoRange.disabled = !controlsEnabled;
+  elements.arduinoServoNumber.disabled = !controlsEnabled;
+  elements.arduinoVibrationToggle.disabled = !controlsEnabled;
+  elements.arduinoCenterButton.disabled = !controlsEnabled;
+  elements.arduinoAllStopButton.disabled = !controlsEnabled;
 }
 
 function syncArduinoCommandInputs(command) {
@@ -564,6 +1286,7 @@ function commandsEqual(left, right) {
 
 function applyArduinoTelemetry(telemetry) {
   if (!telemetry) {
+    state.objectSearch.joystickYPermille = null;
     elements.arduinoDistance.textContent = "--";
     elements.arduinoDistanceFlags.textContent = "--";
     elements.arduinoAccelX.textContent = "--";
@@ -572,6 +1295,7 @@ function applyArduinoTelemetry(telemetry) {
     elements.arduinoJoystickX.textContent = "--";
     elements.arduinoJoystickY.textContent = "--";
     elements.arduinoJoystickButton.textContent = "--";
+    renderObjectSearchGuideLine();
     return;
   }
 
@@ -600,12 +1324,15 @@ function applyArduinoTelemetry(telemetry) {
   elements.arduinoJoystickButton.textContent = telemetry.joystickButtonPressed
     ? "Pressed"
     : "Released";
+  state.objectSearch.joystickYPermille = telemetry.joystickYPermille;
+  renderObjectSearchGuideLine();
 }
 
 function applyArduinoStatus(status, options = {}) {
   const { replaceLog = false, forceCommandSync = false } = options;
   state.arduino.status = status;
   state.arduino.selectedPort = status.selectedPort || state.arduino.selectedPort;
+  const canControl = hasSenderPrivileges();
 
   elements.arduinoAvailabilityDetail.textContent = status.available
     ? "Prêt côté serveur"
@@ -618,8 +1345,8 @@ function applyArduinoStatus(status, options = {}) {
   elements.arduinoInvalidCount.textContent = String(status.invalidFrameCount);
   elements.arduinoLastRx.textContent = formatTimestamp(status.lastRxTimestamp);
   elements.arduinoDebugBadge.textContent = status.debugEnabled ? "Actif" : "Inactif";
-  elements.arduinoConnectButton.disabled = !status.available || status.connected;
-  elements.arduinoDisconnectButton.disabled = !status.connected;
+  elements.arduinoConnectButton.disabled = !canControl || !status.available || status.connected;
+  elements.arduinoDisconnectButton.disabled = !canControl || !status.connected;
   setArduinoManualControlsEnabled(status.connected);
 
   const serverCommand = commandFromStatus(status);
@@ -686,7 +1413,7 @@ function renderArduinoPortOptions(ports) {
 }
 
 async function requestJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const response = await fetch(url, buildFetchOptions(options));
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
     throw new Error(payload?.error || "La requete a echoue.");
@@ -694,10 +1421,15 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
-async function requestLocalStream() {
+async function requestLocalStream(cameraDeviceId = "") {
   const preferredConstraints = {
-    audio: true,
-    video: buildVideoConstraints(),
+    audio: {
+      channelCount: { ideal: 1 },
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+    video: buildVideoConstraints(cameraDeviceId),
   };
 
   try {
@@ -711,7 +1443,12 @@ async function requestLocalStream() {
   }
 
   const fallbackStream = await navigator.mediaDevices.getUserMedia({
-    audio: true,
+    audio: {
+      channelCount: { ideal: 1 },
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
     video: {
       frameRate: {
         ideal: getConfiguredVideoMaxFps(),
@@ -723,15 +1460,46 @@ async function requestLocalStream() {
   return fallbackStream;
 }
 
-function buildPeerConnection() {
+function buildPeerConnection(role) {
   const iceServers = (window.APP_CONFIG?.iceServers || []).map((url) => ({ urls: url }));
   const connection = new RTCPeerConnection({ iceServers });
 
+  if (role === SESSION_ROLE_SPECTATOR) {
+    state.remoteStream = new MediaStream();
+    connection.addEventListener("track", (event) => {
+      if (state.peerConnection !== connection || event.track.kind !== "video") {
+        return;
+      }
+      const remoteStream = event.streams?.[0] || state.remoteStream;
+      if (remoteStream !== state.remoteStream) {
+        state.remoteStream = remoteStream;
+      } else {
+        state.remoteStream.addTrack(event.track);
+      }
+      elements.preview.srcObject = state.remoteStream;
+      setStatus("Spectator", "La video du sender est affichee en direct.");
+    });
+  }
+
   connection.addEventListener("connectionstatechange", () => {
+    if (state.peerConnection !== connection) {
+      return;
+    }
     const label = `WebRTC ${connection.connectionState}`;
     setStatus(label, "Le navigateur maintient la connexion avec le serveur.");
     if (["failed", "disconnected", "closed"].includes(connection.connectionState)) {
       setBusy(false);
+      if (state.connectedRole === SESSION_ROLE_SPECTATOR) {
+        window.setTimeout(() => {
+          disconnect({ notifyServer: false, preserveStatus: true }).catch((error) => {
+            console.error(error);
+          });
+          setStatus(
+              "En attente",
+              "Le flux du sender n'est plus disponible. Reconnecte-toi ou change de role.",
+          );
+        }, 0);
+      }
     }
   });
 
@@ -762,10 +1530,46 @@ function waitForIceGatheringComplete(connection) {
 
 async function fetchStatus() {
   const payload = await requestJson("/api/webrtc/status");
-  const detail = payload.active
-    ? `Session ${payload.state}, etat pair: ${payload.connectionState}.`
-    : payload.error || "Aucune session active.";
-  setStatus(payload.state, detail);
+  state.roomStatus = payload;
+
+  if (state.connectedRole === SESSION_ROLE_SENDER) {
+    setStatus(
+        "Sender",
+        payload.spectatorOccupied
+          ? "Votre flux est en direct et un spectator est connecte."
+          : "Votre flux est en direct. Le slot spectator est libre.",
+    );
+    return payload;
+  }
+
+  if (state.connectedRole === SESSION_ROLE_SPECTATOR) {
+    setStatus(
+        "Spectator",
+        payload.senderVideoAvailable
+          ? "Vous regardez la video du sender."
+          : "En attente du flux video du sender.",
+    );
+    return payload;
+  }
+
+  if (payload.senderVideoAvailable && payload.spectatorOccupied) {
+    setStatus("Salle pleine", "Un sender et un spectator sont deja connectes.");
+    return payload;
+  }
+  if (payload.senderVideoAvailable) {
+    setStatus("Sender actif", "Un sender diffuse deja. Le mode spectator est disponible.");
+    return payload;
+  }
+  if (payload.senderOccupied) {
+    setStatus(
+        "Preparation",
+        "Le sender se connecte. Attends que la video soit disponible pour rejoindre en spectator.",
+    );
+    return payload;
+  }
+
+  setStatus("En attente", "Aucune session active.");
+  return payload;
 }
 
 function startStatusPolling() {
@@ -787,66 +1591,128 @@ function stopStatusPolling() {
 async function connect() {
   clearError();
   clearVoiceError();
-  ensureVoiceAudioContext();
+  state.requestedRole = selectedRole();
 
-  if (!window.isSecureContext && window.location.hostname !== "localhost") {
-    showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
-    return;
-  }
+  if (state.requestedRole === SESSION_ROLE_SENDER) {
+    ensureVoiceAudioContext();
 
-  if (!navigator.mediaDevices?.getUserMedia) {
-    showError("Ce navigateur ne supporte pas getUserMedia.");
-    return;
+    if (!window.isSecureContext && window.location.hostname !== "localhost") {
+      showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
+      return;
+    }
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      showError("Ce navigateur ne supporte pas getUserMedia.");
+      return;
+    }
   }
 
   setBusy(true);
-  setStatus("Preparation", "Demande des permissions camera et micro...");
+  setStatus(
+      state.requestedRole === SESSION_ROLE_SENDER ? "Preparation" : "Spectator",
+      state.requestedRole === SESSION_ROLE_SENDER
+        ? "Demande des permissions camera et micro..."
+        : "Connexion au flux video du sender...",
+  );
 
   try {
-    state.localStream = await requestLocalStream();
-    elements.preview.srcObject = state.localStream;
+    if (state.requestedRole === SESSION_ROLE_SENDER) {
+      state.localStream = await requestLocalStream(selectedCameraDeviceId());
+      elements.preview.srcObject = state.localStream;
+      await refreshCameraDevices().catch((error) => {
+        console.error(error);
+      });
+    } else {
+      state.localStream = null;
+      state.remoteStream = new MediaStream();
+      elements.preview.srcObject = null;
+    }
 
-    state.peerConnection = buildPeerConnection();
-    state.localStream.getTracks().forEach((track) => {
-      state.peerConnection.addTrack(track, state.localStream);
-    });
+    state.peerConnection = buildPeerConnection(state.requestedRole);
+    if (state.requestedRole === SESSION_ROLE_SENDER) {
+      state.localStream.getTracks().forEach((track) => {
+        state.peerConnection.addTrack(track, state.localStream);
+      });
+    } else {
+      state.peerConnection.addTransceiver("video", { direction: "recvonly" });
+    }
 
     const offer = await state.peerConnection.createOffer();
     await state.peerConnection.setLocalDescription(offer);
     await waitForIceGatheringComplete(state.peerConnection);
 
+    const localDescription = state.peerConnection.localDescription;
+    if (!localDescription?.sdp || !localDescription?.type) {
+      throw new Error("L'offre WebRTC locale est incomplète.");
+    }
+
     setStatus("Negociation", "Envoi de l'offre WebRTC au serveur...");
     const payload = await requestJson("/api/webrtc/offer", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(state.peerConnection.localDescription),
+      body: JSON.stringify({
+        sdp: localDescription.sdp,
+        type: localDescription.type,
+        role: state.requestedRole,
+      }),
     });
 
-    await state.peerConnection.setRemoteDescription(payload);
-    setStatus("Streaming", "Le flux mobile est connecte au serveur.");
-    await fetchVoiceStatus();
+    state.sessionToken = payload.sessionToken || null;
+    state.connectedRole = payload.role || state.requestedRole;
+    updateProtectedControls();
+    await state.peerConnection.setRemoteDescription({
+      sdp: payload.sdp,
+      type: payload.type,
+    });
+    setStatus(
+        state.connectedRole === SESSION_ROLE_SENDER ? "Sender" : "Spectator",
+        state.connectedRole === SESSION_ROLE_SENDER
+          ? "Votre camera et votre micro sont connectes au serveur."
+          : "En attente de la video du sender...",
+    );
+    await Promise.all([
+      fetchVoiceStatus(),
+      fetchObjectSearchStatus(),
+      fetchModeStatus(),
+      fetchStatus(),
+    ]);
     startVoiceStatusPolling();
+    startObjectSearchStatusPolling();
+    startModeStatusPolling();
     openVoiceEventStream();
+    openObjectSearchEventStream();
+    openModeEventStream();
     startStatusPolling();
   } catch (error) {
     console.error(error);
     await disconnect({ notifyServer: true, preserveStatus: true });
     showError(error.message || "La connexion a echoue.");
-    setStatus("Erreur", "Le flux n'a pas pu etre etabli.");
+    setStatus(
+        "Erreur",
+        state.requestedRole === SESSION_ROLE_SENDER
+          ? "Le flux n'a pas pu etre etabli."
+          : "Le mode spectator n'a pas pu etre etabli.",
+    );
   }
 }
 
 async function disconnect(options = {}) {
   const { notifyServer = true, preserveStatus = false } = options;
+  const sessionToken = state.sessionToken;
 
   stopStatusPolling();
   stopVoiceStatusPolling();
+  stopObjectSearchStatusPolling();
+  stopModeStatusPolling();
   clearVoiceReconnectTimer();
+  clearObjectSearchReconnectTimer();
+  clearModeReconnectTimer();
 
   if (state.peerConnection) {
-    state.peerConnection.getSenders().forEach((sender) => sender.track?.stop());
-    state.peerConnection.close();
+    const peerConnection = state.peerConnection;
     state.peerConnection = null;
+    peerConnection.getSenders().forEach((sender) => sender.track?.stop());
+    peerConnection.close();
   }
 
   if (state.localStream) {
@@ -854,23 +1720,42 @@ async function disconnect(options = {}) {
     state.localStream = null;
   }
 
+  state.remoteStream = null;
+  state.sessionToken = null;
+  state.connectedRole = null;
   elements.preview.srcObject = null;
   setBusy(false);
+  updateProtectedControls();
 
-  if (notifyServer) {
+  if (notifyServer && sessionToken) {
     try {
-      await fetch("/api/webrtc/session", { method: "DELETE" });
+      await fetch("/api/webrtc/session", buildFetchOptions({
+        method: "DELETE",
+        headers: {
+          [SESSION_TOKEN_HEADER]: sessionToken,
+        },
+      }));
     } catch (error) {
       console.error(error);
     }
   }
 
   if (!preserveStatus) {
-    setStatus("En attente", "Aucune session active.");
+    await fetchStatus().catch(() => {
+      setStatus("En attente", "Aucune session active.");
+    });
   }
 
   closeVoiceEventStream();
   resetVoiceState();
+  closeObjectSearchEventStream();
+  resetObjectSearchState();
+  closeModeEventStream();
+  startModeStatusPolling();
+  openModeEventStream();
+  fetchModeStatus().catch((error) => {
+    console.error(error);
+  });
 }
 
 async function fetchArduinoStatus() {
@@ -919,35 +1804,49 @@ function openArduinoEventStream() {
 }
 
 async function setArduinoDebugMode(enabled) {
+  if (!hasSenderPrivileges()) {
+    throw new Error(
+        "Connecte-toi comme sender pour modifier le mode debug Arduino.",
+    );
+  }
   const payload = await requestJson("/api/arduino/debug", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ enabled }),
+    includeSessionToken: true,
   });
   applyArduinoStatus(payload);
 }
 
 async function connectArduino() {
+  if (!hasSenderPrivileges()) {
+    throw new Error("Connecte-toi comme sender pour controler l'Arduino.");
+  }
   clearArduinoError();
   state.arduino.selectedPort = elements.arduinoPortSelect.value;
   const payload = await requestJson("/api/arduino/connection", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ port: state.arduino.selectedPort }),
+    includeSessionToken: true,
   });
   applyArduinoStatus(payload, { replaceLog: true });
 }
 
 async function disconnectArduino() {
+  if (!hasSenderPrivileges()) {
+    throw new Error("Connecte-toi comme sender pour controler l'Arduino.");
+  }
   clearArduinoError();
   const payload = await requestJson("/api/arduino/connection", {
     method: "DELETE",
+    includeSessionToken: true,
   });
   applyArduinoStatus(payload, { replaceLog: true });
 }
 
 async function sendArduinoCommand() {
-  if (!state.arduino.status?.connected) {
+  if (!hasSenderPrivileges() || !state.arduino.status?.connected) {
     return;
   }
 
@@ -969,6 +1868,7 @@ async function sendArduinoCommand() {
         servoAngleDegrees: commandToSend.servoAngleDegrees,
         vibrationEnabled: commandToSend.vibrationEnabled,
       }),
+      includeSessionToken: true,
     });
     state.arduino.commandDirty = false;
     applyArduinoStatus(payload);
@@ -993,8 +1893,10 @@ function scheduleArduinoCommandSync() {
 function updateArduinoDebugVisibility() {
   elements.arduinoDebugPanel.hidden = !state.arduino.debugVisible;
   elements.debugToggleButton.textContent = state.arduino.debugVisible
-    ? "Masquer le debug Arduino"
-    : "Activer le debug Arduino";
+    ? "Masquer Arduino"
+    : (hasSenderPrivileges()
+      ? "Activer le debug Arduino"
+      : "Voir Arduino (lecture seule)");
 }
 
 function toggleVoiceDebugPanel() {
@@ -1011,24 +1913,27 @@ async function toggleArduinoDebugPanel() {
     try {
       await Promise.all([fetchArduinoStatus(), fetchArduinoPorts()]);
       openArduinoEventStream();
-      await setArduinoDebugMode(true);
+      if (hasSenderPrivileges()) {
+        await setArduinoDebugMode(true);
+      }
     } catch (error) {
       console.error(error);
-      showArduinoError(error.message || "Impossible d'activer le debug Arduino.");
+      showArduinoError(error.message || "Impossible d'ouvrir le panneau Arduino.");
     }
     return;
   }
 
-  closeArduinoEventStream();
   if (state.arduino.commandSyncTimeout !== null) {
     window.clearTimeout(state.arduino.commandSyncTimeout);
     state.arduino.commandSyncTimeout = null;
   }
 
-  try {
-    await setArduinoDebugMode(false);
-  } catch (error) {
-    console.error(error);
+  if (hasSenderPrivileges()) {
+    try {
+      await setArduinoDebugMode(false);
+    } catch (error) {
+      console.error(error);
+    }
   }
 
   state.arduino.debugVisible = false;
@@ -1057,6 +1962,36 @@ elements.disconnectButton.addEventListener("click", () => {
   disconnect().catch((error) => {
     console.error(error);
     showError("La deconnexion a echoue.");
+  });
+});
+
+elements.roleSelect.addEventListener("change", (event) => {
+  state.requestedRole = event.target.value;
+  clearError();
+  updateProtectedControls();
+  updateCameraControls();
+});
+
+elements.cameraSelect.addEventListener("change", (event) => {
+  state.camera.selectedDeviceId = event.target.value || "";
+  if (state.connectedRole === SESSION_ROLE_SENDER) {
+    switchCameraTrackIfNeeded().catch((error) => {
+      console.error(error);
+      showError(error.message || "Impossible de changer de caméra.");
+    });
+  }
+});
+
+elements.refreshCamerasButton.addEventListener("click", () => {
+  refreshCameraDevices().catch((error) => {
+    console.error(error);
+    showError("Impossible d'actualiser la liste des caméras.");
+  });
+});
+
+elements.objectSearchVisionModelSelect.addEventListener("change", (event) => {
+  updateObjectSearchVisionModel(event.target.value).catch((error) => {
+    console.error(error);
   });
 });
 
@@ -1146,8 +2081,14 @@ elements.arduinoAllStopButton.addEventListener("click", () => {
 window.addEventListener("beforeunload", () => {
   stopStatusPolling();
   stopVoiceStatusPolling();
+  stopObjectSearchStatusPolling();
+  stopModeStatusPolling();
   clearVoiceReconnectTimer();
+  clearObjectSearchReconnectTimer();
+  clearModeReconnectTimer();
   closeVoiceEventStream();
+  closeObjectSearchEventStream();
+  closeModeEventStream();
   closeArduinoEventStream();
   if (state.peerConnection) {
     state.peerConnection.close();
@@ -1158,17 +2099,48 @@ window.addEventListener("beforeunload", () => {
 });
 
 updateVoiceDebugVisibility();
+state.requestedRole = selectedRole();
+updateCameraControls();
+renderObjectSearchVisionModelOptions();
 resetVoiceState();
+resetObjectSearchState();
+applyModeStatus({ mode: "idle", detail: "Mode idle." });
 updateArduinoDebugVisibility();
 setArduinoManualControlsEnabled(false);
 applyArduinoTelemetry(null);
 renderProtocolLog();
+updateProtectedControls();
 
 fetchStatus().catch(() => {
   setStatus("Serveur", "Le serveur est pret, mais le statut initial n'a pas pu etre lu.");
 });
 
+refreshCameraDevices().catch((error) => {
+  console.error(error);
+});
+
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    refreshCameraDevices().catch((error) => {
+      console.error(error);
+    });
+  });
+}
+
 fetchVoiceStatus().catch(() => {
   elements.voiceAvailabilityDetail.textContent =
     "Le statut voix initial n'a pas pu etre lu.";
 });
+
+fetchObjectSearchStatus().catch(() => {
+  elements.objectSearchDetail.textContent =
+    "Le statut initial de recherche d'objet n'a pas pu etre lu.";
+});
+
+fetchModeStatus().catch(() => {
+  elements.activeModeDetail.textContent =
+    "Le statut initial du mode actif n'a pas pu etre lu.";
+});
+startModeStatusPolling();
+openModeEventStream();
+openArduinoEventStream();

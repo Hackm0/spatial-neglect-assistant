@@ -324,12 +324,37 @@ void test_command_timeout_returns_failsafe_output() {
   ActuatorCommand current = supervisor.currentCommand(200UL);
   TEST_ASSERT_FALSE(supervisor.isFailsafeActive(200UL));
   TEST_ASSERT_FLOAT_WITHIN(0.05F, 135.0F, current.servoAngleDegrees);
-  TEST_ASSERT_TRUE(current.vibrationEnabled);
+  TEST_ASSERT_FALSE(current.vibrationEnabled);
 
   current = supervisor.currentCommand(260UL);
   TEST_ASSERT_TRUE(supervisor.isFailsafeActive(260UL));
   TEST_ASSERT_FLOAT_WITHIN(0.05F, 90.0F, current.servoAngleDegrees);
   TEST_ASSERT_FALSE(current.vibrationEnabled);
+}
+
+void test_vibration_guard_turns_off_after_max_on_window() {
+  ActuatorCommandSupervisor supervisor(90.0F, 10000UL, 150UL);
+
+  const ActuatorCommand command = {135.0F, true};
+  supervisor.acceptCommand(command, 10UL);
+
+  ActuatorCommand current = supervisor.currentCommand(120UL);
+  TEST_ASSERT_TRUE(current.vibrationEnabled);
+
+  current = supervisor.currentCommand(160UL);
+  TEST_ASSERT_FALSE(current.vibrationEnabled);
+
+  supervisor.acceptCommand(command, 270UL);
+  current = supervisor.currentCommand(300UL);
+  TEST_ASSERT_FALSE(current.vibrationEnabled);
+
+  supervisor.acceptCommand({135.0F, false}, 350UL);
+  current = supervisor.currentCommand(360UL);
+  TEST_ASSERT_FALSE(current.vibrationEnabled);
+
+  supervisor.acceptCommand(command, 400UL);
+  current = supervisor.currentCommand(500UL);
+  TEST_ASSERT_TRUE(current.vibrationEnabled);
 }
 
 void test_exclusive_transport_lock_accepts_first_transport_and_refreshes_it() {
@@ -413,6 +438,7 @@ int main(int argc, char** argv) {
   RUN_TEST(
       test_endpoint_with_mirrored_stream_uses_primary_for_commands_and_mirrors_telemetry);
   RUN_TEST(test_command_timeout_returns_failsafe_output);
+  RUN_TEST(test_vibration_guard_turns_off_after_max_on_window);
   RUN_TEST(
       test_exclusive_transport_lock_accepts_first_transport_and_refreshes_it);
   RUN_TEST(

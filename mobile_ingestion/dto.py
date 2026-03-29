@@ -6,8 +6,21 @@ from typing import Any, Mapping
 
 from mobile_ingestion.analyzer import AnalyzerMetrics
 from mobile_ingestion.arduino import ArduinoSnapshot
+from mobile_ingestion.mode_manager import RuntimeModeStatus
+from mobile_ingestion.object_search import ObjectSearchStatus
 from mobile_ingestion.voice import TranscriptEntry, VoiceStatus, WakeWordEvent
 from uart_protocol import ActuatorCommand, RawFrameEvent, TelemetrySnapshot
+
+SESSION_ROLES = ("sender", "spectator")
+
+
+def normalize_session_role(value: Any) -> str:
+  normalized = str(value).strip().lower()
+  if normalized not in SESSION_ROLES:
+    supported = ", ".join(SESSION_ROLES)
+    raise ValueError(
+        f"Field 'role' must be one of: {supported}.")
+  return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,21 +47,76 @@ class SessionDescriptionDto:
 
 
 @dataclass(frozen=True, slots=True)
-class SessionStatusDto:
+class SessionOfferRequestDto:
+  sdp: str
+  type: str
+  role: str
+
+  @classmethod
+  def from_mapping(cls,
+                   payload: Mapping[str, Any]) -> "SessionOfferRequestDto":
+    description = SessionDescriptionDto.from_mapping(payload)
+    return cls(
+        sdp=description.sdp,
+        type=description.type,
+        role=normalize_session_role(payload.get("role")),
+    )
+
+  def to_description(self) -> SessionDescriptionDto:
+    return SessionDescriptionDto(
+        sdp=self.sdp,
+        type=self.type,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOfferResponseDto:
+  sdp: str
+  type: str
+  role: str
+  session_token: str
+
+  @classmethod
+  def from_description(
+      cls,
+      description: SessionDescriptionDto,
+      *,
+      role: str,
+      session_token: str,
+  ) -> "SessionOfferResponseDto":
+    return cls(
+        sdp=description.sdp,
+        type=description.type,
+        role=role,
+        session_token=session_token,
+    )
+
+  def to_dict(self) -> dict[str, str]:
+    return {
+        "sdp": self.sdp,
+        "type": self.type,
+        "role": self.role,
+        "sessionToken": self.session_token,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class SessionSlotStatusDto:
   state: str
   active: bool
+  role: str
   session_id: str | None
   connection_state: str
   has_video_track: bool
   has_audio_track: bool
   started_at: str | None
   error: str | None
-  analyzer_metrics: AnalyzerMetrics
 
   @classmethod
   def from_values(
       cls,
       *,
+      role: str,
       state: str,
       active: bool,
       session_id: str | None,
@@ -57,9 +125,9 @@ class SessionStatusDto:
       has_audio_track: bool,
       started_at: datetime | None,
       error: str | None,
-      analyzer_metrics: AnalyzerMetrics,
-  ) -> "SessionStatusDto":
+  ) -> "SessionSlotStatusDto":
     return cls(
+        role=role,
         state=state,
         active=active,
         session_id=session_id,
@@ -68,11 +136,11 @@ class SessionStatusDto:
         has_audio_track=has_audio_track,
         started_at=started_at.isoformat() if started_at else None,
         error=error,
-        analyzer_metrics=analyzer_metrics,
     )
 
   def to_dict(self) -> dict[str, Any]:
     return {
+        "role": self.role,
         "state": self.state,
         "active": self.active,
         "sessionId": self.session_id,
@@ -81,6 +149,28 @@ class SessionStatusDto:
         "hasAudioTrack": self.has_audio_track,
         "startedAt": self.started_at,
         "error": self.error,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RoomStatusDto:
+  room_state: str
+  sender_occupied: bool
+  spectator_occupied: bool
+  sender_video_available: bool
+  sender: SessionSlotStatusDto | None
+  spectator: SessionSlotStatusDto | None
+  analyzer_metrics: AnalyzerMetrics
+
+  def to_dict(self) -> dict[str, Any]:
+    return {
+        "roomState": self.room_state,
+        "senderOccupied": self.sender_occupied,
+        "spectatorOccupied": self.spectator_occupied,
+        "senderVideoAvailable": self.sender_video_available,
+        "sender": self.sender.to_dict() if self.sender is not None else None,
+        "spectator": (self.spectator.to_dict()
+                       if self.spectator is not None else None),
         "analyzerMetrics": self.analyzer_metrics.to_dict(),
     }
 
@@ -314,6 +404,115 @@ class VoiceStatusDto:
         "lastWakeWord": (self.last_wake_word.to_dict()
                           if self.last_wake_word is not None else None),
         "entries": [entry.to_dict() for entry in self.entries],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectSearchStatusDto:
+  available: bool
+  active: bool
+  session_id: str | None
+  state: str
+  target_label: str | None
+  detected: bool
+  last_detected_at: str | None
+  error: str | None
+  model_ready: bool
+  model_state: str
+  model_detail: str | None
+  selected_vision_model: str | None
+
+  @classmethod
+  def from_status(cls, status: ObjectSearchStatus) -> "ObjectSearchStatusDto":
+    return cls(
+        available=status.available,
+        active=status.active,
+        session_id=status.session_id,
+        state=status.state,
+        target_label=status.target_label,
+        detected=status.detected,
+        last_detected_at=(status.last_detected_at.isoformat()
+                          if status.last_detected_at is not None else None),
+        error=status.error,
+        model_ready=status.model_ready,
+        model_state=status.model_state,
+        model_detail=status.model_detail,
+        selected_vision_model=status.selected_vision_model,
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "available": self.available,
+        "active": self.active,
+        "sessionId": self.session_id,
+        "state": self.state,
+        "targetLabel": self.target_label,
+        "detected": self.detected,
+        "lastDetectedAt": self.last_detected_at,
+        "error": self.error,
+        "modelReady": self.model_ready,
+        "modelState": self.model_state,
+        "modelDetail": self.model_detail,
+        "selectedVisionModel": self.selected_vision_model,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeModeStatusDto:
+  available: bool
+  active: bool
+  session_id: str | None
+  mode: str
+  detail: str | None
+  error: str | None
+  plate_visible: bool | None
+  is_eating: bool | None
+  one_side_food_remaining: bool | None
+  remaining_side: str | None
+  paper_visible: bool | None
+  is_writing: bool | None
+  one_side_writing: bool | None
+  writing_side: str | None
+  last_updated_at: str | None
+
+  @classmethod
+  def from_status(cls, status: RuntimeModeStatus) -> "RuntimeModeStatusDto":
+    return cls(
+        available=status.available,
+        active=status.active,
+        session_id=status.session_id,
+        mode=status.mode,
+        detail=status.detail,
+        error=status.error,
+        plate_visible=status.plate_visible,
+        is_eating=status.is_eating,
+        one_side_food_remaining=status.one_side_food_remaining,
+        remaining_side=status.remaining_side,
+        paper_visible=status.paper_visible,
+        is_writing=status.is_writing,
+        one_side_writing=status.one_side_writing,
+        writing_side=status.writing_side,
+        last_updated_at=(status.last_updated_at.isoformat()
+                         if status.last_updated_at is not None else None),
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "available": self.available,
+        "active": self.active,
+        "sessionId": self.session_id,
+        "mode": self.mode,
+        "detail": self.detail,
+        "error": self.error,
+        "plateVisible": self.plate_visible,
+        "isEating": self.is_eating,
+        "oneSideFoodRemaining": self.one_side_food_remaining,
+        "remainingSide": self.remaining_side,
+        "paperVisible": self.paper_visible,
+        "isWriting": self.is_writing,
+        "oneSideWriting": self.one_side_writing,
+        "writingSide": self.writing_side,
+        "lastUpdatedAt": self.last_updated_at,
     }
 
 

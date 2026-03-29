@@ -3,27 +3,56 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone
+from threading import Lock
 
 from av.audio.resampler import AudioResampler
 from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
                     RTCSessionDescription)
+from aiortc.contrib.media import MediaRelay
 from aiortc.mediastreams import MediaStreamError
 
 from mobile_ingestion.analyzer import (AudioFrameEnvelope, SessionMetadata,
                                        VideoFrameEnvelope)
 from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.object_search import ObjectSearchFrame
 from mobile_ingestion.session_manager import (PeerSessionPort, SessionCallbacks,
                                               SessionContext)
 from mobile_ingestion.voice import AudioChunk, PCM_SAMPLE_RATE
 
 VOICE_APPEND_WINDOW_MS = 200
+OBJECT_SEARCH_MAX_LONG_EDGE_PX = 1280
+
+
+class SenderVideoRelayHub:
+
+  def __init__(self) -> None:
+    self._relay = MediaRelay()
+    self._lock = Lock()
+    self._source_track: object | None = None
+
+  def set_source_track(self, track: object) -> None:
+    with self._lock:
+      self._source_track = track
+
+  def clear_source_track(self) -> None:
+    with self._lock:
+      self._source_track = None
+
+  def subscribe(self) -> object | None:
+    with self._lock:
+      source_track = self._source_track
+    if source_track is None:
+      return None
+    return self._relay.subscribe(source_track)
 
 
 class WebRtcPeerSession(PeerSessionPort):
 
-  def __init__(self, context: SessionContext, callbacks: SessionCallbacks) -> None:
+  def __init__(self, context: SessionContext, callbacks: SessionCallbacks,
+               *, sender_video_relay: SenderVideoRelayHub) -> None:
     self._context = context
     self._callbacks = callbacks
+    self._sender_video_relay = sender_video_relay
     self._metadata = SessionMetadata(
         session_id=context.session_id,
         started_at=context.started_at,
@@ -45,16 +74,19 @@ class WebRtcPeerSession(PeerSessionPort):
     self._closed = False
     self._session_started = False
     self._session_stopped = False
+    self._spectator_video_track_attached = False
     self._register_callbacks()
 
   async def accept_offer(
       self, offer: SessionDescriptionDto) -> SessionDescriptionDto:
     remote_description = RTCSessionDescription(sdp=offer.sdp, type=offer.type)
     await self._peer_connection.setRemoteDescription(remote_description)
+    if self._context.role == "spectator":
+      self._attach_spectator_video_track()
     answer = await self._peer_connection.createAnswer()
     await self._peer_connection.setLocalDescription(answer)
     await self._wait_for_ice_completion()
-    if not self._session_started:
+    if self._context.role == "sender" and not self._session_started:
       self._context.analyzer.on_session_started(self._metadata)
       self._session_started = True
     local_description = self._peer_connection.localDescription
@@ -68,6 +100,8 @@ class WebRtcPeerSession(PeerSessionPort):
     if self._closed:
       return
     self._closed = True
+    if self._context.role == "sender":
+      self._sender_video_relay.clear_source_track()
     for task in list(self._consumer_tasks):
       task.cancel()
     if self._consumer_tasks:
@@ -86,13 +120,31 @@ class WebRtcPeerSession(PeerSessionPort):
 
     @self._peer_connection.on("track")
     def _on_track(track: object) -> None:
+      if self._context.role != "sender":
+        return
       kind = getattr(track, "kind", None)
       if kind == "video":
-        self._callbacks.on_video_track_detected()
-        self._track_task(asyncio.create_task(self._consume_video(track)))
+        self._handle_incoming_video_track(track)
       elif kind == "audio":
         self._callbacks.on_audio_track_detected()
         self._track_task(asyncio.create_task(self._consume_audio(track)))
+
+  def _handle_incoming_video_track(self, track: object) -> None:
+    self._sender_video_relay.set_source_track(track)
+    self._callbacks.on_video_track_detected()
+    analyzer_track = self._sender_video_relay.subscribe()
+    if analyzer_track is not None:
+      self._track_task(asyncio.create_task(self._consume_video(analyzer_track)))
+
+  def _attach_spectator_video_track(self) -> None:
+    if self._spectator_video_track_attached:
+      return
+    spectator_track = self._sender_video_relay.subscribe()
+    if spectator_track is None:
+      raise RuntimeError("sender video unavailable")
+    self._peer_connection.addTrack(spectator_track)
+    self._spectator_video_track_attached = True
+    self._callbacks.on_video_track_detected()
 
   def _track_task(self, task: asyncio.Task[None]) -> None:
     self._consumer_tasks.add(task)
@@ -119,6 +171,11 @@ class WebRtcPeerSession(PeerSessionPort):
             pts=frame.pts,
         )
         self._context.analyzer.on_video_frame(envelope)
+        search_frame = self._object_search_frame_from_video_frame(
+            frame, envelope.received_at)
+        if search_frame is not None:
+          self._context.object_search.submit_frame(search_frame)
+          self._context.runtime_mode.submit_frame(search_frame)
     except (asyncio.CancelledError, MediaStreamError):
       return
 
@@ -180,6 +237,48 @@ class WebRtcPeerSession(PeerSessionPort):
     self._pending_voice_pcm.clear()
     self._pending_voice_received_at = None
 
+  def _object_search_frame_from_video_frame(
+      self,
+      frame: object,
+      received_at: datetime,
+  ) -> ObjectSearchFrame | None:
+    try:
+      width = int(frame.width)
+      height = int(frame.height)
+    except Exception:
+      return None
+
+    prepared_frame = frame
+    long_edge = max(width, height)
+    if long_edge > OBJECT_SEARCH_MAX_LONG_EDGE_PX:
+      scale = OBJECT_SEARCH_MAX_LONG_EDGE_PX / long_edge
+      target_width = max(1, int(round(width * scale)))
+      target_height = max(1, int(round(height * scale)))
+      if hasattr(frame, "reformat"):
+        try:
+          prepared_frame = frame.reformat(
+              width=target_width,
+              height=target_height,
+              format="rgb24",
+          )
+        except Exception:
+          prepared_frame = frame
+
+    try:
+      rgb_data = prepared_frame.to_ndarray(format="rgb24")
+      prepared_width = int(prepared_frame.width)
+      prepared_height = int(prepared_frame.height)
+    except Exception:
+      return None
+
+    return ObjectSearchFrame(
+        session_id=self._context.session_id,
+        received_at=received_at,
+        image_rgb=rgb_data,
+        width=prepared_width,
+        height=prepared_height,
+    )
+
   async def _wait_for_ice_completion(self) -> None:
     if self._peer_connection.iceGatheringState == "complete":
       return
@@ -197,7 +296,7 @@ class WebRtcPeerSession(PeerSessionPort):
     )
 
   def _notify_session_stopped(self) -> None:
-    if self._session_started and not self._session_stopped:
+    if self._context.role == "sender" and self._session_started and not self._session_stopped:
       with suppress(Exception):
         self._context.analyzer.on_session_stopped(self._metadata)
       self._session_stopped = True

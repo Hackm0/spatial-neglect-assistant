@@ -227,6 +227,10 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 
+# Local model snapshots
+models/*
+!models/.gitkeep
+
 # Marimo
 marimo/_static/
 marimo/_lsp/

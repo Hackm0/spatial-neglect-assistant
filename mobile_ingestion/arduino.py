@@ -822,8 +822,17 @@ class PySerialArduinoController(ArduinoControllerPort):
     )
 
   def _effective_command_locked(self) -> ActuatorCommand:
-    command = self._debug_command if self._debug_enabled else self._backend_command
-    return ProtocolCodec.clamp_command(command)
+    if not self._debug_enabled:
+      return ProtocolCodec.clamp_command(self._backend_command)
+
+    # In debug mode, keep manual servo control but still allow backend
+    # vibration bursts (object detection feedback) to reach the actuator.
+    return ProtocolCodec.clamp_command(
+        ActuatorCommand(
+            servo_angle_degrees=self._debug_command.servo_angle_degrees,
+            vibration_enabled=(self._debug_command.vibration_enabled
+                               or self._backend_command.vibration_enabled),
+        ))
 
   def _default_detail(self) -> str:
     if serial is not None:

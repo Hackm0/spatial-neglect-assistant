@@ -8,6 +8,10 @@ namespace {
 
 constexpr float kMinimumNormalizedInput = -1.0F;
 constexpr float kMaximumNormalizedInput = 1.0F;
+constexpr float kVirtualObjectForceToAcceleration = 6.0F;
+constexpr float kVirtualObjectDampingPerSecond = 3.0F;
+constexpr float kFallbackSensorSampleSeconds = 0.02F;
+constexpr unsigned long kMaxContinuousVibrationOnMs = 150UL;
 
 float clampFloat(const float value, const float minimum, const float maximum) {
   if (value < minimum) {
@@ -40,6 +44,31 @@ int16_t normalizedToPermille(const float value) {
   const long roundedValue = static_cast<long>(
       scaledValue + (scaledValue >= 0.0F ? 0.5F : -0.5F));
   return roundToInt16(roundedValue);
+}
+
+void updateVirtualObjectMotion(const float forceInput, const float deltaSeconds,
+                 float& position, float& velocity) {
+  const float clampedForce =
+    clampFloat(forceInput, kMinimumNormalizedInput, kMaximumNormalizedInput);
+  const float clampedDeltaSeconds =
+    deltaSeconds > 0.0F ? deltaSeconds : kFallbackSensorSampleSeconds;
+
+  // Simulate a damped virtual object with joystick-derived force input.
+  const float acceleration =
+    (clampedForce * kVirtualObjectForceToAcceleration) -
+    (velocity * kVirtualObjectDampingPerSecond);
+  velocity += acceleration * clampedDeltaSeconds;
+  position += velocity * clampedDeltaSeconds;
+
+  const float clampedPosition =
+    clampFloat(position, kMinimumNormalizedInput, kMaximumNormalizedInput);
+  if (clampedPosition != position) {
+  position = clampedPosition;
+  velocity = 0.0F;
+  return;
+  }
+
+  position = clampedPosition;
 }
 
 int16_t accelerationToMilliG(const float accelInG) {
@@ -76,6 +105,7 @@ FirmwareApplication::FirmwareApplication(const FirmwareApplicationConfig& config
                                      : *secondaryTransport),
       accelerometer_(wire),
       joystick_(config_.joystickConfig),
+      ledScale_(config_.ledScaleConfig),
       distanceSensor_(config_.distanceSensorConfig),
       servoMotor_(config_.servoConfig),
       vibrationMotor_(config_.vibrationMotorConfig),
@@ -86,8 +116,11 @@ FirmwareApplication::FirmwareApplication(const FirmwareApplicationConfig& config
       accelerometerRetryInterval_(config_.accelerometerRetryIntervalMs),
       transportLock_(config_.protocolConfig.commandTimeoutMs),
       commandSupervisor_(config_.servoConfig.initialAngle,
-                         config_.protocolConfig.commandTimeoutMs),
-      latestSnapshot_() {}
+                         config_.protocolConfig.commandTimeoutMs,
+                         kMaxContinuousVibrationOnMs),
+      latestSnapshot_(),
+      virtualOutputPosition_(0.0F),
+      virtualOutputVelocity_(0.0F) {}
 
 bool FirmwareApplication::begin() {
   const unsigned long nowMs = millis();
@@ -103,6 +136,7 @@ bool FirmwareApplication::begin() {
   accelerometerRetryInterval_.reset(nowMs);
 
   joystick_.begin();
+  ledScale_.begin();
   const bool distanceSensorInitialized = distanceSensor_.begin();
   const bool servoInitialized = servoMotor_.begin();
   vibrationMotor_.begin();
@@ -111,7 +145,7 @@ bool FirmwareApplication::begin() {
   static_cast<void>(accelerometer_.begin());
   refreshSensors();
   captureDistanceState();
-  applyActuatorCommand(commandSupervisor_.currentCommand(nowMs));
+  applyActuatorCommand(commandSupervisor_.currentCommand(nowMs), false);
 
   return distanceSensorInitialized && servoInitialized;
 }
@@ -135,7 +169,11 @@ void FirmwareApplication::update(const unsigned long nowMs) {
     commandSupervisor_.acceptCommand(receivedCommand, nowMs);
   }
 
-  applyActuatorCommand(commandSupervisor_.currentCommand(nowMs));
+  const ActuatorCommand command = commandSupervisor_.currentCommand(nowMs);
+  const bool autonomousVibrationEnabled =
+      autonomousVibrationController_.update(latestSnapshot_, nowMs);
+  applyActuatorCommand(command, autonomousVibrationEnabled);
+  vibrationMotor_.update(nowMs);
   servoMotor_.update(nowMs);
 
   if (distanceSensor_.update()) {
@@ -176,9 +214,11 @@ void FirmwareApplication::resetSecondaryTransportReception() {
   secondaryProtocolEndpoint_.resetReception();
 }
 
-void FirmwareApplication::applyActuatorCommand(const ActuatorCommand& command) {
+void FirmwareApplication::applyActuatorCommand(
+    const ActuatorCommand& command, const bool autonomousVibrationEnabled) {
   servoMotor_.setTargetAngle(command.servoAngleDegrees);
-  vibrationMotor_.setEnabled(command.vibrationEnabled);
+  vibrationMotor_.setEnabled(command.vibrationEnabled ||
+                             autonomousVibrationEnabled);
 }
 
 void FirmwareApplication::captureDistanceState() {
@@ -204,9 +244,19 @@ void FirmwareApplication::captureDistanceState() {
 void FirmwareApplication::refreshSensors() {
   joystick_.refresh();
   const JoystickPosition position = joystick_.getPosition();
+
+  const float deltaSeconds =
+      config_.sensorSampleIntervalMs > 0UL
+          ? static_cast<float>(config_.sensorSampleIntervalMs) / 1000.0F
+          : kFallbackSensorSampleSeconds;
+  updateVirtualObjectMotion(position.y, deltaSeconds, virtualOutputPosition_,
+                            virtualOutputVelocity_);
+
   latestSnapshot_.joystickXPermille = normalizedToPermille(position.x);
-  latestSnapshot_.joystickYPermille = normalizedToPermille(position.y);
+  latestSnapshot_.joystickYPermille =
+      normalizedToPermille(virtualOutputPosition_);
   latestSnapshot_.joystickButtonPressed = joystick_.isButtonPressed();
+  ledScale_.setScalePermille(latestSnapshot_.joystickYPermille);
 
   if (!accelerometer_.isInitialized()) {
     setAccelerometerUnavailable();

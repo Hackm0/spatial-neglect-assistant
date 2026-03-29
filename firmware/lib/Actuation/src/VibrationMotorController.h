@@ -12,6 +12,7 @@ class VibrationMotorController {
   explicit VibrationMotorController(const VibrationMotorConfig& config);
 
   void begin();
+  void update(unsigned long nowMs);
   void turnOn();
   void turnOff();
   void setEnabled(bool enabled);
@@ -25,4 +26,7 @@ class VibrationMotorController {
   const VibrationMotorConfig config_;
   bool enabled_;
   bool initialized_;
+  bool requestActive_;
+  bool safetyLatched_;
+  unsigned long startedAtMs_;
 };

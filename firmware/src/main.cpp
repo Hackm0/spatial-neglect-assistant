@@ -11,6 +11,7 @@ constexpr uint8_t kJoystickYPin = A1;
 constexpr uint8_t kJoystickButtonPin = 2U;
 constexpr uint8_t kServoPin = 9U;
 constexpr uint8_t kVibrationMotorPin = 10U;
+constexpr uint8_t kLedPins[] = {3U, 5U, 11U, 4U, 6U};
 
 constexpr float kServoMinAngle = 0.0F;
 constexpr float kServoMaxAngle = 180.0F;
@@ -53,12 +54,18 @@ const ServoMotorConfig kServoConfig = {kServoPin,
 
 const VibrationMotorConfig kVibrationMotorConfig = {kVibrationMotorPin, true};
 
+const LedScaleConfig kLedScaleConfig = {
+  kLedPins,
+  static_cast<uint8_t>(sizeof(kLedPins) / sizeof(kLedPins[0])),
+  true};
+
 const ProtocolConfig kProtocolConfig = makeProtocolConfig();
 
 const FirmwareApplicationConfig kFirmwareConfig = {kDistanceSensorConfig,
                                                    kJoystickConfig,
                                                    kServoConfig,
                                                    kVibrationMotorConfig,
+                                                   kLedScaleConfig,
                                                    kProtocolConfig,
                                                    kSensorSampleIntervalMs,
                                                    kAccelerometerRetryIntervalMs};
