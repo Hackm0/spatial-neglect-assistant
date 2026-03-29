@@ -90,12 +90,56 @@ h1 {
 }
 
 .preview {
+  display: block;
+  position: relative;
+  z-index: 1;
   width: 100%;
   min-height: 260px;
   border-radius: 20px;
   background: linear-gradient(135deg, #dbece5 0%, #c2e7da 100%);
   object-fit: cover;
   border: 1px solid rgba(15, 118, 110, 0.16);
+}
+
+.preview-shell {
+  position: relative;
+  overflow: hidden;
+  border-radius: 20px;
+}
+
+.object-search-unused-zone {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 50%;
+  background:
+    repeating-linear-gradient(
+      45deg,
+      rgba(71, 85, 105, 0.16) 0,
+      rgba(71, 85, 105, 0.16) 10px,
+      rgba(71, 85, 105, 0.05) 10px,
+      rgba(71, 85, 105, 0.05) 20px
+    ),
+    linear-gradient(180deg, rgba(148, 163, 184, 0.2) 0%, rgba(100, 116, 139, 0.16) 100%);
+  border-left: 1px solid rgba(51, 65, 85, 0.4);
+  pointer-events: none;
+  z-index: 10;
+}
+
+.object-search-guide-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 6px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: linear-gradient(180deg, #ef4444 0%, #f97316 100%);
+  outline: 2px solid rgba(255, 255, 255, 0.95);
+  box-shadow: 0 0 0 1px rgba(17, 24, 39, 0.5), 0 0 24px rgba(249, 115, 22, 0.75);
+  pointer-events: none;
+  z-index: 20;
 }
 
 .object-search-panel {

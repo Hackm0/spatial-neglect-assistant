@@ -1,15 +1,12 @@
 #include "AutonomousVibrationController.h"
 
-#include <math.h>
-
 namespace {
 
-constexpr uint16_t kProximityTriggerMm = 600U;
-constexpr float kMotionBaselineMilliG = 1000.0F;
-constexpr float kMotionThresholdMilliG = 150.0F;
-constexpr unsigned long kBurstDurationMs = 3000UL;
-constexpr unsigned long kPulsePeriodMs = 1000UL;
-constexpr unsigned long kPulseOnTimeMs = 150UL;
+constexpr uint16_t kProximityTriggerMm = 900U;
+constexpr int16_t kMotionAxisThresholdMilliG = 180;
+constexpr unsigned long kBurstDurationMs = 1500UL;
+constexpr unsigned long kPulsePeriodMs = 1200UL;
+constexpr unsigned long kPulseOnTimeMs = 100UL;
 
 }  // namespace
 
@@ -77,11 +74,14 @@ bool AutonomousVibrationController::isMotionDetected(
     return false;
   }
 
-  const float accelX = static_cast<float>(snapshot.accelXMilliG);
-  const float accelY = static_cast<float>(snapshot.accelYMilliG);
-  const float accelZ = static_cast<float>(snapshot.accelZMilliG);
-  const float magnitudeMilliG =
-      sqrtf(accelX * accelX + accelY * accelY + accelZ * accelZ);
-  const float deviationMilliG = fabsf(magnitudeMilliG - kMotionBaselineMilliG);
-  return deviationMilliG >= kMotionThresholdMilliG;
+  const int32_t accelXAbs = snapshot.accelXMilliG >= 0
+                                ? static_cast<int32_t>(snapshot.accelXMilliG)
+                                : -static_cast<int32_t>(snapshot.accelXMilliG);
+  const int32_t accelZAbs = snapshot.accelZMilliG >= 0
+                                ? static_cast<int32_t>(snapshot.accelZMilliG)
+                                : -static_cast<int32_t>(snapshot.accelZMilliG);
+
+  // Trigger motion if either horizontal axis exceeds the sensitivity threshold.
+  return accelXAbs > kMotionAxisThresholdMilliG ||
+         accelZAbs > kMotionAxisThresholdMilliG;
 }

@@ -141,6 +141,39 @@ class FakeFeedback(ObjectFeedbackPort):
     self.shutdown_calls += 1
 
 
+@dataclass(frozen=True, slots=True)
+class FakeTelemetry:
+  joystick_x_permille: int
+  joystick_y_permille: int
+
+
+@dataclass(frozen=True, slots=True)
+class FakeArduinoSnapshot:
+  latest_telemetry: FakeTelemetry | None
+
+
+class FakeArduinoController:
+
+  def __init__(self) -> None:
+    self._snapshot = FakeArduinoSnapshot(
+        latest_telemetry=FakeTelemetry(
+            joystick_x_permille=0,
+            joystick_y_permille=0,
+        ))
+
+  def set_joystick_y_permille(self, value: int | None) -> None:
+    telemetry = None
+    if value is not None:
+      telemetry = FakeTelemetry(
+          joystick_x_permille=0,
+          joystick_y_permille=value,
+      )
+    self._snapshot = FakeArduinoSnapshot(latest_telemetry=telemetry)
+
+  def get_snapshot(self) -> FakeArduinoSnapshot:
+    return self._snapshot
+
+
 class FakeUrlOpen:
 
   def __init__(self, response_payload: dict[str, object]) -> None:
@@ -231,6 +264,7 @@ class CoordinatorFixture:
   detector: FakeObjectDetector
   resolver: FakeResolver
   feedback: FakeFeedback
+  arduino: FakeArduinoController
 
 
 def make_fixture(*, command_timeout_seconds: float = 8.0) -> CoordinatorFixture:
@@ -238,8 +272,10 @@ def make_fixture(*, command_timeout_seconds: float = 8.0) -> CoordinatorFixture:
   detector = FakeObjectDetector()
   resolver = FakeResolver()
   feedback = FakeFeedback()
+  arduino = FakeArduinoController()
   coordinator = ObjectSearchCoordinator(
       voice_processor=voice,
+      arduino_controller=arduino,
       object_detector=detector,
       target_resolver=resolver,
       feedback=feedback,
@@ -253,6 +289,7 @@ def make_fixture(*, command_timeout_seconds: float = 8.0) -> CoordinatorFixture:
       detector=detector,
       resolver=resolver,
       feedback=feedback,
+      arduino=arduino,
   )
 
 
@@ -320,7 +357,11 @@ def test_switching_vision_model_preserves_target_and_resets_search() -> None:
   wait_until(lambda: fixture.coordinator.snapshot().state == "searching")
 
   fixture.detector.results.put(
-      ObjectDetectionResult(detected=True, matched_label="water bottle"))
+      ObjectDetectionResult(
+          detected=True,
+          matched_label="water bottle",
+          center_x_norm=0.25,
+      ))
   fixture.coordinator.submit_frame(_frame())
   wait_until(lambda: fixture.coordinator.snapshot().state == "found")
 
@@ -355,7 +396,11 @@ def test_object_search_detection_triggers_feedback_and_cancel_clears_it() -> Non
   wait_until(lambda: fixture.coordinator.snapshot().state == "searching")
 
   fixture.detector.results.put(
-      ObjectDetectionResult(detected=True, matched_label="phone"))
+      ObjectDetectionResult(
+          detected=True,
+          matched_label="phone",
+          center_x_norm=0.2,
+      ))
   fixture.coordinator.submit_frame(_frame())
   wait_until(lambda: fixture.coordinator.snapshot().state == "found")
 
@@ -371,6 +416,40 @@ def test_object_search_detection_triggers_feedback_and_cancel_clears_it() -> Non
   assert fixture.feedback.cleared_sessions[-1] == "session-one"
 
 
+def test_object_search_ignores_detected_object_right_of_joystick_line() -> None:
+  fixture = make_fixture()
+  fixture.arduino.set_joystick_y_permille(0)
+  fixture.resolver.queue_response(
+      ObjectTargetResolution(
+        action="search",
+        display_label_fr="téléphone",
+        detector_labels_en=("phone",),
+      ))
+
+  fixture.coordinator.start_session("session-one")
+  fixture.voice.emit(
+      VoiceEvent(
+          "transcript",
+          _final_transcript("jarvis trouve mon telephone"),
+      ))
+  wait_until(lambda: fixture.coordinator.snapshot().state == "searching")
+
+  fixture.detector.results.put(
+      ObjectDetectionResult(
+          detected=True,
+          matched_label="phone",
+          center_x_norm=0.75,
+      ))
+  fixture.coordinator.submit_frame(_frame())
+  time.sleep(0.05)
+  snapshot = fixture.coordinator.snapshot()
+  fixture.coordinator.stop_session("session-one")
+
+  assert snapshot.state == "searching"
+  assert snapshot.detected is False
+  assert fixture.feedback.detected_sessions == []
+
+
 def test_openai_vision_detector_requires_api_key() -> None:
   detector = OpenAiVisionDetector(api_key="", model="gpt-5.4-mini")
 
@@ -383,6 +462,7 @@ def test_openai_vision_detector_builds_responses_payload_for_gpt54_models(
   urlopen = FakeUrlOpen(_response_payload({
       "detected": True,
       "matchedLabel": "phone",
+      "centerXNorm": 0.3,
   }))
   detector = OpenAiVisionDetector(
       api_key="test-key",
@@ -407,6 +487,12 @@ def test_openai_vision_detector_builds_responses_payload_for_gpt54_models(
   enum_values = payload["text"]["format"]["schema"]["properties"][
       "matchedLabel"]["anyOf"][0]["enum"]
   assert "phone" in enum_values
+  assert payload["text"]["format"]["schema"]["required"] == [
+      "detected",
+      "matchedLabel",
+      "centerXNorm",
+  ]
+  assert result.center_x_norm == pytest.approx(0.3)
 
 
 def test_openai_vision_detector_omits_reasoning_for_gpt4o(
@@ -414,6 +500,7 @@ def test_openai_vision_detector_omits_reasoning_for_gpt4o(
   urlopen = FakeUrlOpen(_response_payload({
       "detected": False,
       "matchedLabel": None,
+      "centerXNorm": None,
   }))
   detector = OpenAiVisionDetector(
       api_key="test-key",

@@ -12,6 +12,10 @@ const OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS = 2000;
 const OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS = 1500;
 const MODE_STATUS_POLL_INTERVAL_MS = 2000;
 const MODE_EVENT_RECONNECT_DELAY_MS = 1500;
+const JOYSTICK_X_MIN_PERMILLE = -1000;
+const JOYSTICK_X_MAX_PERMILLE = 1000;
+const OBJECT_SEARCH_LINE_MIN_RATIO = 1 / 3;
+const OBJECT_SEARCH_LINE_MAX_RATIO = 2 / 3;
 
 const elements = {
   connectButton: document.getElementById("connect-button"),
@@ -19,6 +23,8 @@ const elements = {
   roleSelect: document.getElementById("role-select"),
   errorMessage: document.getElementById("error-message"),
   preview: document.getElementById("local-preview"),
+  objectSearchUnusedZone: document.getElementById("object-search-unused-zone"),
+  objectSearchGuideLine: document.getElementById("object-search-guide-line"),
   statusBadge: document.getElementById("status-badge"),
   statusDetail: document.getElementById("status-detail"),
   activeModeBadge: document.getElementById("active-mode-badge"),
@@ -112,6 +118,7 @@ const state = {
     reconnectTimeout: null,
     status: null,
     modelUpdateInFlight: false,
+    joystickYPermille: null,
   },
   mode: {
     eventSource: null,
@@ -173,6 +180,41 @@ function showObjectSearchError(message) {
 
 function clearObjectSearchError() {
   clearMessage(elements.objectSearchErrorMessage);
+}
+
+function clamp(value, minimum, maximum) {
+  return Math.max(minimum, Math.min(maximum, value));
+}
+
+function computeObjectSearchLineRatio(joystickPermille) {
+  const safeJoystick = Number.isFinite(joystickPermille)
+    ? clamp(Number(joystickPermille), JOYSTICK_X_MIN_PERMILLE, JOYSTICK_X_MAX_PERMILLE)
+    : 0;
+  const normalized = (safeJoystick - JOYSTICK_X_MIN_PERMILLE)
+    / (JOYSTICK_X_MAX_PERMILLE - JOYSTICK_X_MIN_PERMILLE);
+  return OBJECT_SEARCH_LINE_MIN_RATIO
+    + ((OBJECT_SEARCH_LINE_MAX_RATIO - OBJECT_SEARCH_LINE_MIN_RATIO) * normalized);
+}
+
+function renderObjectSearchGuideLine() {
+  if (!elements.objectSearchGuideLine) {
+    return;
+  }
+  if (elements.objectSearchUnusedZone) {
+    elements.objectSearchUnusedZone.hidden = false;
+    elements.objectSearchUnusedZone.removeAttribute("hidden");
+    elements.objectSearchUnusedZone.style.display = "block";
+  }
+  elements.objectSearchGuideLine.hidden = false;
+  elements.objectSearchGuideLine.removeAttribute("hidden");
+  elements.objectSearchGuideLine.style.display = "block";
+
+  const lineRatio = computeObjectSearchLineRatio(state.objectSearch.joystickYPermille);
+  const linePercent = `${(lineRatio * 100).toFixed(2)}%`;
+  elements.objectSearchGuideLine.style.left = linePercent;
+  if (elements.objectSearchUnusedZone) {
+    elements.objectSearchUnusedZone.style.left = linePercent;
+  }
 }
 
 function showArduinoError(message) {
@@ -677,6 +719,7 @@ function resetObjectSearchState() {
   clearObjectSearchModelUpdateStatus();
   updateProtectedControls();
   clearObjectSearchError();
+  renderObjectSearchGuideLine();
 }
 
 function getModeLabel(mode) {
@@ -700,6 +743,7 @@ function applyModeStatus(status) {
       ? "Recherche d'objet en cours."
       : (mode === "eating" ? "Mode repas actif." : "Mode idle."))
   );
+  renderObjectSearchGuideLine();
 }
 
 async function fetchModeStatus() {
@@ -1082,6 +1126,7 @@ function commandsEqual(left, right) {
 
 function applyArduinoTelemetry(telemetry) {
   if (!telemetry) {
+    state.objectSearch.joystickYPermille = null;
     elements.arduinoDistance.textContent = "--";
     elements.arduinoDistanceFlags.textContent = "--";
     elements.arduinoAccelX.textContent = "--";
@@ -1090,6 +1135,7 @@ function applyArduinoTelemetry(telemetry) {
     elements.arduinoJoystickX.textContent = "--";
     elements.arduinoJoystickY.textContent = "--";
     elements.arduinoJoystickButton.textContent = "--";
+    renderObjectSearchGuideLine();
     return;
   }
 
@@ -1118,6 +1164,8 @@ function applyArduinoTelemetry(telemetry) {
   elements.arduinoJoystickButton.textContent = telemetry.joystickButtonPressed
     ? "Pressed"
     : "Released";
+  state.objectSearch.joystickYPermille = telemetry.joystickYPermille;
+  renderObjectSearchGuideLine();
 }
 
 function applyArduinoStatus(status, options = {}) {
@@ -1712,7 +1760,6 @@ async function toggleArduinoDebugPanel() {
     return;
   }
 
-  closeArduinoEventStream();
   if (state.arduino.commandSyncTimeout !== null) {
     window.clearTimeout(state.arduino.commandSyncTimeout);
     state.arduino.commandSyncTimeout = null;
@@ -1902,3 +1949,4 @@ fetchModeStatus().catch(() => {
 });
 startModeStatusPolling();
 openModeEventStream();
+openArduinoEventStream();

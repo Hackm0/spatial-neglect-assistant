@@ -39,7 +39,21 @@
         <p id="active-mode-detail" class="status-detail compact">Mode idle.</p>
         <p id="status-detail" class="status-detail">Aucune session active.</p>
 
-        <video id="local-preview" class="preview" autoplay playsinline muted></video>
+        <div class="preview-shell">
+          <video id="local-preview" class="preview" autoplay playsinline muted></video>
+          <div
+            id="object-search-unused-zone"
+            class="object-search-unused-zone"
+            hidden
+            aria-hidden="true"
+          ></div>
+          <div
+            id="object-search-guide-line"
+            class="object-search-guide-line"
+            hidden
+            aria-hidden="true"
+          ></div>
+        </div>
 
         <section class="object-search-panel" aria-live="polite">
           <div class="status-row compact">

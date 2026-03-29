@@ -12,6 +12,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Protocol
 
+from mobile_ingestion.arduino import ArduinoControllerPort
 from mobile_ingestion.config import normalize_object_search_vision_model
 from mobile_ingestion.object_feedback import (NoOpObjectFeedback,
                                               ObjectFeedbackPort)
@@ -66,6 +67,29 @@ def _coerce_string(value: object) -> str | None:
     return None
   stripped = value.strip()
   return stripped or None
+
+
+def _clamp(value: float, minimum: float, maximum: float) -> float:
+  return max(minimum, min(maximum, value))
+
+
+def _joystick_permille_to_line_x_norm(joystick_permille: int | None) -> float:
+  if joystick_permille is None:
+    return 0.5
+  clamped = int(_clamp(float(joystick_permille), -1000.0, 1000.0))
+  normalized = (clamped + 1000) / 2000
+  return (1.0 / 3.0) + (normalized / 3.0)
+
+
+def _coerce_center_x_norm(value: object) -> float | None:
+  if value is None:
+    return None
+  if not isinstance(value, (int, float)):
+    raise RuntimeError("OpenAI a retourne une position horizontale invalide.")
+  normalized = float(value)
+  if normalized < 0.0 or normalized > 1.0:
+    raise RuntimeError("OpenAI a retourne une position horizontale hors limites.")
+  return normalized
 
 
 def _normalize_phrase_tokens(phrase: str) -> tuple[str, ...]:
@@ -232,6 +256,7 @@ class ObjectDetectionResult:
   detected: bool
   matched_label: str | None = None
   score: float | None = None
+  center_x_norm: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -747,8 +772,11 @@ class OpenAiVisionDetector(ObjectDetectorPort):
                             "a l'une des etiquettes candidates est clairement visible. "
                             "Retourne detected=true uniquement si l'objet est present "
                             "de facon assez claire pour etre pointe avec confiance. "
+                          "Quand detected=true, retourne aussi centerXNorm, "
+                          "la position horizontale du centre de l'objet normalisee "
+                          "entre 0 (bord gauche) et 1 (bord droit). "
                             "Si rien n'est clairement visible, retourne detected=false "
-                            "et matchedLabel=null. "
+                          "et matchedLabel=null avec centerXNorm=null. "
                             "matchedLabel doit etre exactement une des etiquettes "
                             f"candidates suivantes: {labels_text}."
                         ),
@@ -782,8 +810,20 @@ class OpenAiVisionDetector(ObjectDetectorPort):
                                 },
                             ],
                         },
+                        "centerXNorm": {
+                          "anyOf": [
+                            {
+                              "type": "number",
+                              "minimum": 0,
+                              "maximum": 1,
+                            },
+                            {
+                              "type": "null",
+                            },
+                          ],
+                        },
                     },
-                    "required": ["detected", "matchedLabel"],
+                      "required": ["detected", "matchedLabel", "centerXNorm"],
                     "additionalProperties": False,
                 },
             },
@@ -848,10 +888,16 @@ class OpenAiVisionDetector(ObjectDetectorPort):
       raise RuntimeError(
           "OpenAI a retourne un resultat de detection visuelle invalide.")
 
+    center_x_norm = _coerce_center_x_norm(response_payload.get("centerXNorm"))
+
     raw_matched_label = response_payload.get("matchedLabel")
     matched_label = (_coerce_string(raw_matched_label)
                      if raw_matched_label is not None else None)
     if detected:
+      if center_x_norm is None:
+        raise RuntimeError(
+            "OpenAI a retourne une position manquante pour la detection visuelle."
+        )
       if matched_label not in candidate_labels:
         raise RuntimeError(
             "OpenAI a retourne une etiquette invalide pour la detection visuelle."
@@ -859,6 +905,7 @@ class OpenAiVisionDetector(ObjectDetectorPort):
       return ObjectDetectionResult(
           detected=True,
           matched_label=matched_label,
+          center_x_norm=center_x_norm,
       )
     return ObjectDetectionResult(detected=False)
 
@@ -914,6 +961,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
       self,
       *,
       voice_processor: VoiceProcessingPort,
+      arduino_controller: ArduinoControllerPort,
       object_detector: ObjectDetectorPort,
       target_resolver: ObjectTargetResolverPort,
       feedback: ObjectFeedbackPort | None = None,
@@ -922,6 +970,7 @@ class ObjectSearchCoordinator(ObjectSearchPort):
       command_timeout_seconds: float,
   ) -> None:
     self._voice_processor = voice_processor
+    self._arduino_controller = arduino_controller
     self._object_detector = object_detector
     self._target_resolver = target_resolver
     self._feedback = feedback or NoOpObjectFeedback()
@@ -1398,12 +1447,17 @@ class ObjectSearchCoordinator(ObjectSearchPort):
                               detection: ObjectDetectionResult,
                               detected_at: datetime) -> None:
     changed = False
+    line_x_norm = self._current_line_x_norm()
+    detected_on_left = (
+        detection.detected
+        and detection.center_x_norm is not None
+        and detection.center_x_norm < line_x_norm)
     with self._lock:
       if session_id != self._active_session_id:
         return
       if not self._target_detector_labels:
         return
-      if detection.detected:
+      if detected_on_left:
         changed = self._replace_status_locked(
             available=True,
             active=True,
@@ -1426,9 +1480,16 @@ class ObjectSearchCoordinator(ObjectSearchPort):
             error=None,
         )
     if changed:
-      if detection.detected:
+      if detected_on_left:
         self._feedback.notify_target_detected(session_id)
       self._broadcast_status()
+
+  def _current_line_x_norm(self) -> float:
+    snapshot = self._arduino_controller.get_snapshot()
+    telemetry = snapshot.latest_telemetry
+    joystick_permille = (
+      telemetry.joystick_y_permille if telemetry is not None else None)
+    return _joystick_permille_to_line_x_norm(joystick_permille)
 
   def _expire_request_window(self, session_id: str) -> None:
     changed = False

@@ -83,6 +83,7 @@ def build_services(settings: AppConfig) -> ServiceContainer:
   )
   object_search = ObjectSearchCoordinator(
       voice_processor=voice_processor,
+      arduino_controller=arduino_controller,
       object_detector=SwitchableObjectDetector(
           model=settings.object_search_vision_model,
           detector_factory=lambda model: OpenAiVisionDetector(
