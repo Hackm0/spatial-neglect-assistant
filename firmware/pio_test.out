@@ -1,0 +1,18 @@
+Verbosity level can be increased via `-v, -vv, or -vvv` option
+Collected 1 tests
+
+Processing test_protocol in native environment
+--------------------------------------------------------------------------------
+Building...
+.pio\build\native\libca3\libUnity.a(unity.o):unity.c:(.text+0x273c): undefined reference to `setUp'
+.pio\build\native\libca3\libUnity.a(unity.o):unity.c:(.text+0x2756): undefined reference to `tearDown'
+collect2.exe: error: ld returned 1 exit status
+*** [.pio\build\native\program.exe] Error 1
+Building stage has failed, see errors above. Use `pio test -vvv` option to enable verbose output.
+--------------- native:test_protocol [ERRORED] Took 1.79 seconds ---------------
+
+=================================== SUMMARY ===================================
+Environment    Test           Status    Duration
+-------------  -------------  --------  ------------
+native         test_protocol  ERRORED   00:00:01.795
+================== 1 test cases: 0 succeeded in 00:00:01.795 ==================

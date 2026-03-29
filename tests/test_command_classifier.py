@@ -85,3 +85,15 @@ def test_classify_natural_language_transcript_clear_phrase() -> None:
   result = classifier.classify({"action": "please clear transcript now"})
 
   assert result.command == "transcript_clear"
+
+
+def test_classify_explicit_spatial_detection_alias() -> None:
+  result = classifier.classify({"command": "spatial_detect"})
+
+  assert result.command == "spatial_detection"
+
+
+def test_classify_natural_language_object_locator_phrase() -> None:
+  result = classifier.classify({"command": "where are my glasses"})
+
+  assert result.command == "spatial_detection"

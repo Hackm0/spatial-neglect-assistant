@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import Lock
@@ -10,6 +11,9 @@ from mobile_ingestion.analyzer import AnalyzerPort
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto, SessionStatusDto
 from mobile_ingestion.runtime import AsyncioRunner
+
+
+logger = logging.getLogger(__name__)
 
 
 class SessionBusyError(RuntimeError):
@@ -68,16 +72,22 @@ class SessionManager:
     self._has_audio_track = False
     self._started_at: datetime | None = None
     self._error: str | None = None
+    self._last_activity_at: datetime | None = None
+    self._auto_off_enabled = False
 
   def accept_offer(self, offer: SessionDescriptionDto) -> SessionDescriptionDto:
     if offer.type != "offer":
       raise InvalidSessionError("Only WebRTC offers can open a session.")
 
+    logger.info("Accepting WebRTC offer type=%s sdp_len=%s", offer.type,
+                len(offer.sdp or ""))
     session = self._create_session()
     try:
       answer = self._runtime.run(session.accept_offer(offer))
+      logger.info("WebRTC offer accepted session_id=%s", self._session_id)
     except Exception as exc:
       self._record_error(str(exc))
+      logger.exception("WebRTC offer failed session_id=%s", self._session_id)
       self._safe_close(session)
       raise
     return answer
@@ -108,9 +118,41 @@ class SessionManager:
     self.close_active_session()
     self._runtime.stop(timeout=self._settings.session_shutdown_timeout_seconds)
 
+  def record_activity(self) -> None:
+    with self._lock:
+      if self._session is None:
+        return
+      self._last_activity_at = datetime.now(timezone.utc)
+
+  def set_auto_off_enabled(self, enabled: bool) -> None:
+    with self._lock:
+      self._auto_off_enabled = bool(enabled)
+
+  def debug_snapshot(self) -> dict[str, object]:
+    now = datetime.now(timezone.utc)
+    with self._lock:
+      started_at = self._started_at
+      last_activity_at = self._last_activity_at
+      session_age_seconds = None
+      idle_seconds = None
+      if started_at is not None:
+        session_age_seconds = max(0.0, (now - started_at).total_seconds())
+      if last_activity_at is not None:
+        idle_seconds = max(0.0, (now - last_activity_at).total_seconds())
+      return {
+          "state": self._state,
+          "sessionId": self._session_id,
+          "connectionState": self._connection_state,
+          "autoOffEnabled": self._auto_off_enabled,
+          "sessionAgeSeconds": session_age_seconds,
+          "idleSeconds": idle_seconds,
+      }
+
   def _create_session(self) -> PeerSessionPort:
     with self._lock:
       if self._session is not None:
+        logger.warning("Rejecting offer: session already active session_id=%s",
+                       self._session_id)
         raise SessionBusyError("A mobile session is already active.")
 
       context = SessionContext(
@@ -134,11 +176,15 @@ class SessionManager:
       self._has_video_track = False
       self._has_audio_track = False
       self._started_at = context.started_at
+      self._last_activity_at = context.started_at
       self._error = None
+      logger.info("Created session session_id=%s state=%s", context.session_id,
+          self._state)
       return session
 
   def _safe_close(self, session: PeerSessionPort) -> None:
     try:
+      logger.info("Closing active session session_id=%s", self._session_id)
       self._runtime.run(
           session.close(),
           timeout=self._settings.session_shutdown_timeout_seconds,
@@ -148,6 +194,7 @@ class SessionManager:
 
   def _update_connection_state(self, connection_state: str) -> None:
     with self._lock:
+      prev_state = self._connection_state
       self._connection_state = connection_state
       if connection_state == "connected":
         self._state = "streaming"
@@ -157,6 +204,13 @@ class SessionManager:
         self._error = f"Peer connection entered '{connection_state}'."
       elif connection_state == "closed" and self._session is not None:
         self._state = "idle"
+      logger.info(
+          "Peer connection state changed session_id=%s %s -> %s app_state=%s",
+          self._session_id,
+          prev_state,
+          connection_state,
+          self._state,
+      )
 
   def _mark_video_track_detected(self) -> None:
     with self._lock:
@@ -170,9 +224,12 @@ class SessionManager:
     with self._lock:
       self._state = "error"
       self._error = message
+      logger.error("Session error session_id=%s message=%s", self._session_id,
+                   message)
 
   def _clear_closed_session(self) -> None:
     with self._lock:
+      closed_session_id = self._session_id
       had_error = self._state == "error"
       self._session = None
       self._session_id = None
@@ -180,8 +237,11 @@ class SessionManager:
       self._has_video_track = False
       self._has_audio_track = False
       self._started_at = None
+      self._last_activity_at = None
       if not had_error:
         self._state = "idle"
+      logger.info("Session cleared session_id=%s had_error=%s", closed_session_id,
+                  had_error)
 
   def _set_idle_state(self) -> None:
     with self._lock:
@@ -192,4 +252,5 @@ class SessionManager:
       self._has_video_track = False
       self._has_audio_track = False
       self._started_at = None
+      self._last_activity_at = None
       self._error = None

@@ -1,675 +1,543 @@
+const STORAGE_KEY = "mobileIngestion.voiceSettings.v1";
+
 const elements = {
-  connectButton: document.getElementById("connect-button"),
-  disconnectButton: document.getElementById("disconnect-button"),
-  errorMessage: document.getElementById("error-message"),
+  orb: document.getElementById("orb"),
+  title: document.getElementById("status-title"),
+  detail: document.getElementById("status-detail"),
   preview: document.getElementById("local-preview"),
-  statusBadge: document.getElementById("status-badge"),
-  statusDetail: document.getElementById("status-detail"),
+  wakePhraseInput: document.getElementById("wake-phrase-input"),
+  idleTimeoutInput: document.getElementById("voice-idle-timeout-input"),
+  saveSettingsButton: document.getElementById("voice-save-settings-button"),
+  toggleVoiceButton: document.getElementById("voice-toggle-button"),
   voiceStatusBadge: document.getElementById("voice-status-badge"),
   voiceStatusDetail: document.getElementById("voice-status-detail"),
   voiceLastCommand: document.getElementById("voice-last-command"),
-  wakePhraseInput: document.getElementById("wake-phrase-input"),
-  voiceIdleTimeoutInput: document.getElementById("voice-idle-timeout-input"),
-  voiceSaveSettingsButton: document.getElementById("voice-save-settings-button"),
-  voiceToggleButton: document.getElementById("voice-toggle-button"),
 };
 
-let localStream = null;
-let peerConnection = null;
-let statusInterval = null;
-let speechRecognition = null;
-let wakeWordListeningEnabled = false;
-let awaitingVoiceCommand = false;
-let commandDeadlineAt = 0;
-let inactivityTimerId = null;
-
-const COMMAND_CAPTURE_WINDOW_MS = 12000;
+const bootstrapConfig = window.mobileIngestionConfig || {};
+const showVoiceControls = Boolean(bootstrapConfig.showVoiceControls);
+const elevenlabsAgentId = typeof bootstrapConfig.elevenlabsAgentId === "string"
+  ? bootstrapConfig.elevenlabsAgentId.trim()
+  : "";
+const useBrowserElevenLabsAgent = Boolean(elevenlabsAgentId) && !showVoiceControls;
 const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
-const SETTINGS_STORAGE_KEY = "mobileIngestion.voiceSettings.v1";
-const DEFAULT_WAKE_WORDS = Array.isArray(window.APP_CONFIG?.voiceWakePhrases)
-  ? window.APP_CONFIG.voiceWakePhrases
-  : ["ok jarvis", "okay jarvis"];
-const DEFAULT_IDLE_TIMEOUT_SECONDS = Number(window.APP_CONFIG?.voiceIdleTimeoutSeconds || 180);
 
-let activeWakeWords = DEFAULT_WAKE_WORDS;
-let activeIdleTimeoutSeconds = DEFAULT_IDLE_TIMEOUT_SECONDS;
+let speechRecognition = null;
+let listening = false;
+let inactivityTimer = null;
+let audioContext = null;
+let pendingAudio = null;
+let unlockHandlersInstalled = false;
+let awaitingCommand = false;
+let awaitingCommandTimer = null;
+let elevenLabsConversation = null;
+let elevenLabsSdkPromise = null;
 
-function setStatus(label, detail) {
-  elements.statusBadge.textContent = label;
-  elements.statusDetail.textContent = detail;
-}
+const defaultSettings = {
+  wakePhrases: Array.isArray(bootstrapConfig.voiceWakePhrases)
+    ? bootstrapConfig.voiceWakePhrases
+    : ["ok jarvis", "okay jarvis"],
+  idleTimeoutSeconds: Number.isFinite(Number(bootstrapConfig.voiceIdleTimeoutSeconds))
+    ? Math.max(1, Number(bootstrapConfig.voiceIdleTimeoutSeconds))
+    : 180,
+};
 
-function showError(message) {
-  elements.errorMessage.hidden = false;
-  elements.errorMessage.textContent = message;
-}
+let settings = { ...defaultSettings };
 
-function clearError() {
-  elements.errorMessage.hidden = true;
-  elements.errorMessage.textContent = "";
-}
-
-function setBusy(isBusy) {
-  elements.connectButton.disabled = isBusy;
-  elements.disconnectButton.disabled = !isBusy;
-}
-
-function setVoiceState(label, detail, stateClass = "") {
-  elements.voiceStatusBadge.textContent = label;
-  elements.voiceStatusDetail.textContent = detail;
-  elements.voiceStatusBadge.classList.remove("voice-state-listening", "voice-state-awaiting");
-  if (stateClass) {
-    elements.voiceStatusBadge.classList.add(stateClass);
+function setOrbState(state) {
+  if (!elements.orb) {
+    return;
+  }
+  elements.orb.className = "orb";
+  if (state) {
+    elements.orb.classList.add(`state-${state}`);
   }
 }
 
-function setLastVoiceCommand(commandText) {
-  elements.voiceLastCommand.textContent = `Derniere commande: ${commandText}`;
-}
-
-function normalizeSpeechText(text) {
-  return text
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9\s]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function sanitizeWakeWords(rawWakeWords) {
-  if (!Array.isArray(rawWakeWords)) {
-    return ["ok jarvis", "okay jarvis"];
+function updateStatus(title, detail, state = "idle") {
+  if (elements.title) {
+    elements.title.textContent = title;
   }
-
-  const normalizedWakeWords = rawWakeWords
-    .map((item) => normalizeSpeechText(String(item || "")))
-    .filter((item) => item.length > 0);
-
-  return normalizedWakeWords.length > 0 ? [...new Set(normalizedWakeWords)] : ["ok jarvis", "okay jarvis"];
-}
-
-function sanitizeIdleTimeoutSeconds(rawValue) {
-  const parsed = Number(rawValue);
-  if (!Number.isFinite(parsed)) {
-    return 180;
+  if (elements.detail) {
+    elements.detail.textContent = detail;
   }
-  const rounded = Math.round(parsed);
-  if (rounded < 5) {
-    return 5;
+  setOrbState(state);
+}
+
+function updateVoiceBadge() {
+  if (!elements.voiceStatusBadge || !elements.voiceStatusDetail) {
+    return;
   }
-  if (rounded > 3600) {
-    return 3600;
+  if (listening) {
+    elements.voiceStatusBadge.textContent = "Ecoute active";
+    elements.voiceStatusDetail.textContent = showVoiceControls
+      ? `Phrases: ${settings.wakePhrases.join(", ")} | Auto-off: ${settings.idleTimeoutSeconds}s`
+      : `Auto-off: ${settings.idleTimeoutSeconds}s`;
+    setOrbState("listening");
+  } else {
+    elements.voiceStatusBadge.textContent = "Desactivee";
+    elements.voiceStatusDetail.textContent = showVoiceControls
+      ? `Auto-off: ${settings.idleTimeoutSeconds}s | Phrases: ${settings.wakePhrases.join(", ")}`
+      : `Auto-off: ${settings.idleTimeoutSeconds}s`;
+    setOrbState("idle");
   }
-  return rounded;
 }
 
-function parseWakeWordsInput(rawValue) {
-  const parts = String(rawValue || "")
-    .split(",")
-    .map((part) => part.trim())
-    .filter((part) => part.length > 0);
-  return sanitizeWakeWords(parts);
+function installAudioUnlockHandlers() {
+  if (unlockHandlersInstalled) {
+    return;
+  }
+  const unlockOnGesture = () => {
+    void unlockAudioPlayback();
+  };
+  window.addEventListener("pointerdown", unlockOnGesture, { passive: true });
+  window.addEventListener("touchstart", unlockOnGesture, { passive: true });
+  window.addEventListener("click", unlockOnGesture, { passive: true });
+  unlockHandlersInstalled = true;
 }
 
-function updateSettingsInputs() {
-  elements.wakePhraseInput.value = activeWakeWords.join(", ");
-  elements.voiceIdleTimeoutInput.value = String(activeIdleTimeoutSeconds);
-}
-
-function loadPersistedVoiceSettings() {
+async function unlockAudioPlayback() {
   try {
-    const raw = window.localStorage.getItem(SETTINGS_STORAGE_KEY);
-    if (!raw) {
-      activeWakeWords = sanitizeWakeWords(DEFAULT_WAKE_WORDS);
-      activeIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(DEFAULT_IDLE_TIMEOUT_SECONDS);
-      updateSettingsInputs();
-      return;
+    const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextCtor && !audioContext) {
+      audioContext = new AudioContextCtor();
+    }
+    if (audioContext && audioContext.state === "suspended") {
+      await audioContext.resume();
     }
 
-    const parsed = JSON.parse(raw);
-    activeWakeWords = sanitizeWakeWords(parsed.wakeWords);
-    activeIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(parsed.idleTimeoutSeconds);
-    updateSettingsInputs();
+    if (pendingAudio) {
+      const audioToPlay = pendingAudio;
+      pendingAudio = null;
+      await audioToPlay.play();
+      await new Promise((resolve) => {
+        audioToPlay.onended = resolve;
+        audioToPlay.onerror = resolve;
+      });
+      if (listening) {
+        updateStatus("Pret", "En ecoute", "listening");
+      } else {
+        updateStatus("Pret", "Audio active", "idle");
+      }
+      updateVoiceBadge();
+    }
   } catch (error) {
-    console.error(error);
-    activeWakeWords = sanitizeWakeWords(DEFAULT_WAKE_WORDS);
-    activeIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(DEFAULT_IDLE_TIMEOUT_SECONDS);
-    updateSettingsInputs();
+    console.debug("Audio unlock still blocked", error);
   }
 }
 
-function persistVoiceSettings() {
-  window.localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify({
-    wakeWords: activeWakeWords,
-    idleTimeoutSeconds: activeIdleTimeoutSeconds,
-  }));
+function loadSettings() {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) {
+      return;
+    }
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed.wakePhrases) && parsed.wakePhrases.length > 0) {
+      settings.wakePhrases = parsed.wakePhrases.map((item) => String(item).toLowerCase());
+    }
+    if (Number.isFinite(Number(parsed.idleTimeoutSeconds))) {
+      settings.idleTimeoutSeconds = Math.max(1, Number(parsed.idleTimeoutSeconds));
+    }
+  } catch (error) {
+    console.warn("Unable to load voice settings", error);
+  }
 }
 
-function applyVoiceSettings() {
-  const nextWakeWords = parseWakeWordsInput(elements.wakePhraseInput.value);
-  const nextIdleTimeoutSeconds = sanitizeIdleTimeoutSeconds(elements.voiceIdleTimeoutInput.value);
+function saveSettings() {
+  if (elements.wakePhraseInput) {
+    const phrases = elements.wakePhraseInput.value
+      .split(",")
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean);
+    settings.wakePhrases = phrases.length > 0 ? phrases : [...defaultSettings.wakePhrases];
+  }
+  if (elements.idleTimeoutInput) {
+    const idle = Number(elements.idleTimeoutInput.value);
+    settings.idleTimeoutSeconds = Number.isFinite(idle) ? Math.max(1, idle) : defaultSettings.idleTimeoutSeconds;
+  }
 
-  activeWakeWords = nextWakeWords;
-  activeIdleTimeoutSeconds = nextIdleTimeoutSeconds;
-  updateSettingsInputs();
-  persistVoiceSettings();
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+  syncInputs();
+  updateVoiceBadge();
+}
 
-  setVoiceState(
-    wakeWordListeningEnabled ? "Ecoute active" : "Desactivee",
-    `Wake phrases: ${activeWakeWords.join(" / ")} | Auto-off: ${activeIdleTimeoutSeconds}s`,
-    wakeWordListeningEnabled ? "voice-state-listening" : "",
-  );
-
-  if (wakeWordListeningEnabled) {
-    restartInactivityTimer();
+function syncInputs() {
+  if (elements.wakePhraseInput) {
+    elements.wakePhraseInput.value = settings.wakePhrases.join(", ");
+  }
+  if (elements.idleTimeoutInput) {
+    elements.idleTimeoutInput.value = String(settings.idleTimeoutSeconds);
   }
 }
 
 function clearInactivityTimer() {
-  if (inactivityTimerId !== null) {
-    window.clearTimeout(inactivityTimerId);
-    inactivityTimerId = null;
+  if (inactivityTimer) {
+    window.clearTimeout(inactivityTimer);
+    inactivityTimer = null;
   }
 }
 
-function restartInactivityTimer() {
-  clearInactivityTimer();
-  if (!wakeWordListeningEnabled) {
+function clearAwaitingCommand() {
+  awaitingCommand = false;
+  if (awaitingCommandTimer) {
+    window.clearTimeout(awaitingCommandTimer);
+    awaitingCommandTimer = null;
+  }
+}
+
+function armAwaitingCommand() {
+  clearAwaitingCommand();
+  awaitingCommand = true;
+  updateStatus("Pret", "Je vous ecoute, dites votre commande", "listening");
+  void speakWakeAcknowledgement();
+  if (elements.voiceLastCommand) {
+    elements.voiceLastCommand.textContent = "En attente de commande...";
+  }
+  awaitingCommandTimer = window.setTimeout(() => {
+    clearAwaitingCommand();
+    if (listening) {
+      updateStatus("Pret", "En ecoute", "listening");
+    }
+  }, 8000);
+}
+
+async function speakWakeAcknowledgement() {
+  if (useBrowserElevenLabsAgent) {
+    updateStatus("Pret", "Agent Jarvis actif", "listening");
     return;
   }
-  inactivityTimerId = window.setTimeout(() => {
-    stopWakeWordListening("Auto-off active apres inactivite.");
-  }, activeIdleTimeoutSeconds * 1000);
-}
-
-function extractWakeWordPayload(normalizedText) {
-  for (const wakeWord of activeWakeWords) {
-    const position = normalizedText.indexOf(wakeWord);
-    if (position !== -1) {
-      const afterWake = normalizedText.slice(position + wakeWord.length).trim();
-      return {
-        matched: true,
-        commandText: afterWake,
-      };
-    }
-  }
-
-  return {
-    matched: false,
-    commandText: "",
-  };
-}
-
-function inferLocalVoiceIntent(commandText) {
-  const normalized = normalizeSpeechText(commandText);
-
-  if (!normalized) {
-    return "unknown";
-  }
-
-  if (/\b(connect|reconnect|start|demarre|ouvre|open)\b/.test(normalized)) {
-    return "connect";
-  }
-
-  if (/\b(disconnect|stop|arrete|close|shutdown|quit)\b/.test(normalized)) {
-    return "disconnect";
-  }
-
-  if (/\b(status|statut|state|health)\b/.test(normalized)) {
-    return "status";
-  }
-
-  return "server";
-}
-
-function beginAwaitingVoiceCommand() {
-  awaitingVoiceCommand = true;
-  commandDeadlineAt = Date.now() + COMMAND_CAPTURE_WINDOW_MS;
-  restartInactivityTimer();
-  setVoiceState(
-    "En attente",
-    "Wake word detecte. Prononcez votre commande maintenant.",
-    "voice-state-awaiting",
-  );
-}
-
-function resetAwaitingVoiceCommand() {
-  awaitingVoiceCommand = false;
-  commandDeadlineAt = 0;
-  if (wakeWordListeningEnabled) {
-    restartInactivityTimer();
-    setVoiceState(
-      "Ecoute active",
-      "Dites \"Ok Jarvis\" pour demarrer une commande.",
-      "voice-state-listening",
-    );
-  }
-}
-
-async function requestLocalStream() {
-  const preferredConstraints = {
-    audio: true,
-    video: {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-    },
-  };
-
   try {
-    return await navigator.mediaDevices.getUserMedia(preferredConstraints);
-  } catch (error) {
-    if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") {
-      throw error;
-    }
-  }
-
-  return navigator.mediaDevices.getUserMedia({
-    audio: true,
-    video: true,
-  });
-}
-
-function buildPeerConnection() {
-  const iceServers = (window.APP_CONFIG?.iceServers || []).map((url) => ({ urls: url }));
-  const connection = new RTCPeerConnection({ iceServers });
-
-  connection.addEventListener("connectionstatechange", () => {
-    const label = `WebRTC ${connection.connectionState}`;
-    setStatus(label, "Le navigateur maintient la connexion avec le serveur.");
-    if (["failed", "disconnected", "closed"].includes(connection.connectionState)) {
-      setBusy(false);
-    }
-  });
-
-  connection.addEventListener("iceconnectionstatechange", () => {
-    if (connection.iceConnectionState === "failed") {
-      showError("La connexion ICE a echoue. Verifie le Wi-Fi local ou le tunnel HTTPS.");
-    }
-  });
-
-  return connection;
-}
-
-function waitForIceGatheringComplete(connection) {
-  if (connection.iceGatheringState === "complete") {
-    return Promise.resolve();
-  }
-
-  return new Promise((resolve) => {
-    const handleStateChange = () => {
-      if (connection.iceGatheringState === "complete") {
-        connection.removeEventListener("icegatheringstatechange", handleStateChange);
-        resolve();
-      }
-    };
-    connection.addEventListener("icegatheringstatechange", handleStateChange);
-  });
-}
-
-async function fetchStatus() {
-  const response = await fetch("/api/webrtc/status");
-  const payload = await response.json();
-  const detail = payload.active
-    ? `Session ${payload.state}, etat pair: ${payload.connectionState}.`
-    : payload.error || "Aucune session active.";
-  setStatus(payload.state, detail);
-}
-
-function startStatusPolling() {
-  stopStatusPolling();
-  statusInterval = window.setInterval(() => {
-    fetchStatus().catch(() => {
-      showError("Impossible de joindre le serveur pour recuperer le statut.");
-    });
-  }, 2000);
-}
-
-function stopStatusPolling() {
-  if (statusInterval !== null) {
-    window.clearInterval(statusInterval);
-    statusInterval = null;
-  }
-}
-
-async function connect() {
-  clearError();
-
-  if (!window.isSecureContext && window.location.hostname !== "localhost") {
-    showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
-    return;
-  }
-
-  if (!navigator.mediaDevices?.getUserMedia) {
-    showError("Ce navigateur ne supporte pas getUserMedia.");
-    return;
-  }
-
-  setBusy(true);
-  setStatus("Preparation", "Demande des permissions camera et micro...");
-
-  try {
-    localStream = await requestLocalStream();
-    elements.preview.srcObject = localStream;
-
-    peerConnection = buildPeerConnection();
-    localStream.getTracks().forEach((track) => {
-      peerConnection.addTrack(track, localStream);
-    });
-
-    const offer = await peerConnection.createOffer();
-    await peerConnection.setLocalDescription(offer);
-    await waitForIceGatheringComplete(peerConnection);
-
-    setStatus("Negociation", "Envoi de l'offre WebRTC au serveur...");
-    const response = await fetch("/api/webrtc/offer", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(peerConnection.localDescription),
-    });
-
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || "La negociation WebRTC a echoue.");
-    }
-
-    await peerConnection.setRemoteDescription(payload);
-    setStatus("Streaming", "Le flux mobile est connecte au serveur.");
-    startStatusPolling();
-  } catch (error) {
-    console.error(error);
-    await disconnect({ notifyServer: true, preserveStatus: true });
-    showError(error.message || "La connexion a echoue.");
-    setStatus("Erreur", "Le flux n'a pas pu etre etabli.");
-  }
-}
-
-async function disconnect(options = {}) {
-  const { notifyServer = true, preserveStatus = false } = options;
-
-  stopStatusPolling();
-
-  if (peerConnection) {
-    peerConnection.getSenders().forEach((sender) => sender.track?.stop());
-    peerConnection.close();
-    peerConnection = null;
-  }
-
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
-    localStream = null;
-  }
-
-  elements.preview.srcObject = null;
-  setBusy(false);
-
-  if (notifyServer) {
-    try {
-      await fetch("/api/webrtc/session", { method: "DELETE" });
-    } catch (error) {
-      console.error(error);
-    }
-  }
-
-  if (!preserveStatus) {
-    setStatus("En attente", "Aucune session active.");
-  }
-}
-
-async function executeVoiceCommand(commandText) {
-  const cleaned = commandText.trim();
-  if (!cleaned) {
-    setVoiceState(
-      "En attente",
-      "Commande vide. Dites \"Ok Jarvis\" puis une commande claire.",
-      "voice-state-awaiting",
-    );
-    return;
-  }
-
-  setLastVoiceCommand(cleaned);
-  const localIntent = inferLocalVoiceIntent(cleaned);
-
-  try {
-    if (localIntent === "connect") {
-      await connect();
-      setVoiceState(
-        "Commande executee",
-        "Connexion lancee depuis la commande vocale.",
-        "voice-state-listening",
-      );
-      return;
-    }
-
-    if (localIntent === "disconnect") {
-      await disconnect();
-      setVoiceState(
-        "Commande executee",
-        "Deconnexion lancee depuis la commande vocale.",
-        "voice-state-listening",
-      );
-      return;
-    }
-
-    if (localIntent === "status") {
-      await fetchStatus();
-      setVoiceState(
-        "Commande executee",
-        "Statut serveur mis a jour.",
-        "voice-state-listening",
-      );
-      return;
-    }
-
     const response = await fetch("/api/webrtc/command", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        command: cleaned,
-        payload: {
-          text: cleaned,
-          source: "voice",
-          final: true,
-        },
+        forceAgent: true,
+        text: "Reponds exactement: Oui, je t'ecoute.",
       }),
     });
-
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.error || "Erreur lors de l'execution de la commande vocale.");
-    }
-
-    if (payload.command === "unknown") {
-      setVoiceState(
-        "Non reconnu",
-        "Commande non reconnue. Reessayez apres \"Ok Jarvis\".",
-        "voice-state-listening",
-      );
+    const data = await response.json();
+    if (data.command !== "agent_response" || !data.result || !data.result.audioData) {
       return;
     }
 
-    setVoiceState(
-      "Commande executee",
-      `Action: ${payload.command}`,
-      "voice-state-listening",
-    );
+    const audio = new Audio("data:audio/mp3;base64," + data.result.audioData);
+    try {
+      await audio.play();
+      await new Promise((resolve) => {
+        audio.onended = resolve;
+        audio.onerror = resolve;
+      });
+    } catch (error) {
+      pendingAudio = audio;
+      updateStatus("Activer le Son", "Click requis par le navigateur", "error");
+      if (elements.voiceStatusDetail) {
+        elements.voiceStatusDetail.textContent = "Activer le Son (Click requis par le navigateur)";
+      }
+    }
   } catch (error) {
-    console.error(error);
-    setVoiceState(
-      "Erreur",
-      error.message || "La commande vocale a echoue.",
-      "voice-state-listening",
-    );
+    console.debug("Wake acknowledgement via agent unavailable", error);
   }
 }
 
-function handleSpeechResult(event) {
-  restartInactivityTimer();
-  for (let i = event.resultIndex; i < event.results.length; i += 1) {
-    const result = event.results[i];
-    if (!result.isFinal) {
-      continue;
-    }
-
-    const transcript = result[0]?.transcript || "";
-    const normalized = normalizeSpeechText(transcript);
-    if (!normalized) {
-      continue;
-    }
-
-    if (awaitingVoiceCommand && commandDeadlineAt > 0 && Date.now() > commandDeadlineAt) {
-      resetAwaitingVoiceCommand();
-    }
-
-    if (!awaitingVoiceCommand) {
-      const wakeDetection = extractWakeWordPayload(normalized);
-      if (!wakeDetection.matched) {
-        continue;
-      }
-
-      beginAwaitingVoiceCommand();
-
-      if (wakeDetection.commandText) {
-        executeVoiceCommand(wakeDetection.commandText).finally(() => {
-          resetAwaitingVoiceCommand();
-        });
-      }
-      continue;
-    }
-
-    executeVoiceCommand(normalized).finally(() => {
-      resetAwaitingVoiceCommand();
-    });
+function updateFromConvaiMessage(message) {
+  if (!message || typeof message !== "object") {
+    return;
+  }
+  if (message.type === "agent_response") {
+    const text = typeof message.text === "string" ? message.text : "Reponse de Jarvis";
+    updateStatus("Reponse de Jarvis", text, "speaking");
   }
 }
 
-function ensureSpeechRecognition() {
-  if (!SpeechRecognitionCtor) {
-    setVoiceState(
-      "Indisponible",
-      "La reconnaissance vocale n'est pas supportee sur ce navigateur.",
-    );
-    elements.voiceToggleButton.disabled = true;
-    return false;
+async function getElevenLabsConversation() {
+  if (!useBrowserElevenLabsAgent) {
+    return null;
+  }
+  if (elevenLabsConversation) {
+    return elevenLabsConversation;
+  }
+  if (!elevenLabsSdkPromise) {
+    elevenLabsSdkPromise = import("https://cdn.jsdelivr.net/npm/@elevenlabs/client/+esm");
   }
 
-  if (!speechRecognition) {
-    speechRecognition = new SpeechRecognitionCtor();
-    speechRecognition.continuous = true;
-    speechRecognition.interimResults = false;
-    speechRecognition.lang = "fr-FR";
-    speechRecognition.addEventListener("result", handleSpeechResult);
-    speechRecognition.addEventListener("error", (event) => {
-      setVoiceState(
-        "Erreur",
-        `Reconnaissance vocale indisponible (${event.error}).`,
-      );
+  const module = await elevenLabsSdkPromise;
+  const Conversation = module && module.Conversation;
+  if (!Conversation || typeof Conversation.startSession !== "function") {
+    throw new Error("ElevenLabs SDK indisponible");
+  }
+
+  elevenLabsConversation = await Conversation.startSession({
+    agentId: elevenlabsAgentId,
+    onConnect: () => {
+      updateStatus("Pret", "Connecte a l'agent Jarvis", "listening");
+    },
+    onDisconnect: () => {
+      elevenLabsConversation = null;
+      if (listening) {
+        updateStatus("Pret", "Session agent fermee, reconnexion automatique", "listening");
+      }
+    },
+    onMessage: (message) => {
+      updateFromConvaiMessage(message);
+    },
+    onError: (message) => {
+      const detail = typeof message === "string" && message.trim()
+        ? message
+        : "Erreur agent ElevenLabs";
+      updateStatus("Erreur Agent", detail, "error");
+    },
+  });
+
+  return elevenLabsConversation;
+}
+
+async function sendToElevenLabsBrowserAgent(commandText) {
+  const conversation = await getElevenLabsConversation();
+  if (!conversation || typeof conversation.sendUserMessage !== "function") {
+    throw new Error("Session agent indisponible");
+  }
+  conversation.sendUserMessage(commandText);
+}
+
+function scheduleAutoOff() {
+  clearInactivityTimer();
+  if (!listening) {
+    return;
+  }
+  inactivityTimer = window.setTimeout(() => {
+    stopListening("Auto-off apres inactivite");
+  }, settings.idleTimeoutSeconds * 1000);
+}
+
+function stopListening(reason) {
+  listening = false;
+  clearInactivityTimer();
+  clearAwaitingCommand();
+  if (speechRecognition) {
+    try {
+      speechRecognition.stop();
+    } catch (error) {
+      console.debug("Unable to stop recognition", error);
+    }
+  }
+  updateStatus("Pret", reason, "idle");
+  updateVoiceBadge();
+}
+
+function hasWakePhrase(text) {
+  const normalized = text.toLowerCase();
+  return settings.wakePhrases.some((phrase) => normalized.includes(phrase));
+}
+
+function isVisualLocatorQuery(text) {
+  const normalized = String(text || "").toLowerCase();
+  const asksLocation = /(where|find|locate|spot|ou\s+est|ou\s+sont|trouve|trouver|reper)/.test(normalized);
+  const likelyStatusCommand = /(status|state|health|ping|connect|disconnect)/.test(normalized);
+  return asksLocation && !likelyStatusCommand;
+}
+
+async function sendCommand(commandText) {
+  if (!commandText) {
+    return;
+  }
+  clearAwaitingCommand();
+
+  if (elements.voiceLastCommand) {
+    elements.voiceLastCommand.textContent = commandText;
+  }
+  // Pause recognition briefly so it doesn't hear itself speak
+  if (speechRecognition) {
+    try { speechRecognition.stop(); } catch(e){}
+  }
+  updateStatus("Traitement", `Commande: ${commandText}`, "speaking");
+
+  try {
+    const wantsVisualLocator = isVisualLocatorQuery(commandText);
+
+    if (useBrowserElevenLabsAgent && !wantsVisualLocator) {
+      await sendToElevenLabsBrowserAgent(commandText);
+      updateStatus("Agent Jarvis", "Commande transmise a ElevenLabs", "speaking");
+      return;
+    }
+
+    const res = await fetch("/api/webrtc/command", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ 
+        command: commandText,
+        text: commandText,
+        forceAgent: !wantsVisualLocator,
+        forceLocator: wantsVisualLocator,
+        payload: { text: commandText, source: "voice", final: true }
+      }),
     });
-    speechRecognition.addEventListener("end", () => {
-      if (wakeWordListeningEnabled) {
+    
+    const data = await res.json();
+    const resultText = data && data.result && typeof data.result.text === "string"
+      ? data.result.text
+      : "Reponse indisponible";
+    if (data.command === "agent_response") {
+      updateStatus("Reponse de Jarvis", resultText, "speaking");
+      if (data.result && data.result.audioData) {
+        const audio = new Audio("data:audio/mp3;base64," + data.result.audioData);
         try {
-          speechRecognition.start();
+          await audio.play();
+          await new Promise((resolve) => {
+            audio.onended = resolve;
+            audio.onerror = resolve;
+          });
         } catch (error) {
-          console.error(error);
+          // Browser requires explicit user interaction before playing assistant audio.
+          pendingAudio = audio;
+          updateStatus("Activer le Son", "Click requis par le navigateur", "error");
+          if (elements.voiceStatusDetail) {
+            elements.voiceStatusDetail.textContent = "Activer le Son (Click requis par le navigateur)";
+          }
+          return;
         }
       }
-    });
+    } else if (data.command === "agent_error") {
+      updateStatus("Erreur Agent", resultText, "error");
+    }
+  } catch (error) {
+    console.warn("Command request failed", error);
+  } finally {
+    if (listening) {
+      updateStatus("Pret", "En ecoute", "listening");
+      if (speechRecognition) {
+        try { speechRecognition.start(); } catch(e){}
+      }
+    }
   }
-
-  return true;
 }
 
-function startWakeWordListening() {
-  if (!ensureSpeechRecognition()) {
+function extractCommand(transcript) {
+  const normalized = transcript.trim();
+  if (!normalized) {
+    return "";
+  }
+  const lower = normalized.toLowerCase();
+  for (const phrase of settings.wakePhrases) {
+    const index = lower.indexOf(phrase.toLowerCase());
+    if (index >= 0) {
+      return normalized.slice(index + phrase.length).trim();
+    }
+  }
+  return "";
+}
+
+function setupSpeechRecognition() {
+  if (!SpeechRecognitionCtor) {
+    updateStatus("Non supporte", "Votre navigateur ne supporte pas SpeechRecognition", "error");
     return;
   }
 
-  wakeWordListeningEnabled = true;
-  resetAwaitingVoiceCommand();
-  elements.voiceToggleButton.textContent = "Desactiver l'ecoute vocale";
-  restartInactivityTimer();
-  setVoiceState(
-    "Ecoute active",
-    `Dites \"${activeWakeWords[0]}\" pour demarrer une commande. Auto-off ${activeIdleTimeoutSeconds}s.`,
-    "voice-state-listening",
-  );
+  speechRecognition = new SpeechRecognitionCtor();
+  speechRecognition.continuous = true;
+  speechRecognition.interimResults = false;
+  speechRecognition.lang = "fr-FR";
+
+  speechRecognition.addEventListener("result", (event) => {
+    scheduleAutoOff();
+    for (let i = event.resultIndex; i < event.results.length; i += 1) {
+      if (!event.results[i].isFinal) {
+        continue;
+      }
+      const transcript = String(event.results[i][0].transcript || "").trim();
+      if (!transcript) {
+        continue;
+      }
+      if (hasWakePhrase(transcript)) {
+        const commandText = extractCommand(transcript);
+        if (commandText) {
+          void sendCommand(commandText);
+        } else {
+          armAwaitingCommand();
+        }
+        continue;
+      }
+
+      if (awaitingCommand) {
+        void sendCommand(transcript);
+      }
+    }
+  });
+
+  speechRecognition.addEventListener("end", () => {
+    if (!listening) {
+      return;
+    }
+    try {
+      speechRecognition.start();
+    } catch (error) {
+      console.debug("Unable to restart recognition", error);
+    }
+  });
+}
+
+async function initializeMedia() {
+  if (!elements.preview || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    return;
+  }
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: true,
+      video: { facingMode: { ideal: "environment" } },
+    });
+    elements.preview.srcObject = stream;
+  } catch (error) {
+    console.warn("Media access denied or unavailable", error);
+  }
+}
+
+function startListening() {
+  if (!speechRecognition) {
+    setupSpeechRecognition();
+  }
+  if (!speechRecognition) {
+    return;
+  }
+
+  listening = true;
+  updateStatus("Pret", "En ecoute", "listening");
+  updateVoiceBadge();
+  scheduleAutoOff();
 
   try {
     speechRecognition.start();
   } catch (error) {
-    console.error(error);
+    console.debug("Unable to start recognition", error);
   }
 }
 
-function stopWakeWordListening(detail = "Cliquez pour reactiver l'ecoute wake-word.") {
-  wakeWordListeningEnabled = false;
-  resetAwaitingVoiceCommand();
-  clearInactivityTimer();
-  elements.voiceToggleButton.textContent = "Activer l'ecoute vocale";
-  setVoiceState(
-    "Desactivee",
-    detail,
-  );
-
-  if (speechRecognition) {
-    speechRecognition.stop();
-  }
-}
-
-elements.connectButton.addEventListener("click", () => {
-  connect().catch((error) => {
-    console.error(error);
-    showError("Une erreur inattendue est survenue.");
-  });
-});
-
-elements.disconnectButton.addEventListener("click", () => {
-  disconnect().catch((error) => {
-    console.error(error);
-    showError("La deconnexion a echoue.");
-  });
-});
-
-elements.voiceToggleButton.addEventListener("click", () => {
-  if (wakeWordListeningEnabled) {
-    stopWakeWordListening();
+function toggleListening() {
+  if (listening) {
+    updateStatus("Pret", "En ecoute", "listening");
+    scheduleAutoOff();
     return;
   }
-
-  startWakeWordListening();
-});
-
-elements.voiceSaveSettingsButton.addEventListener("click", () => {
-  applyVoiceSettings();
-});
-
-window.addEventListener("beforeunload", () => {
-  stopStatusPolling();
-  wakeWordListeningEnabled = false;
-  clearInactivityTimer();
-  if (speechRecognition) {
-    speechRecognition.stop();
-  }
-  if (peerConnection) {
-    peerConnection.close();
-  }
-  if (localStream) {
-    localStream.getTracks().forEach((track) => track.stop());
-  }
-});
-
-fetchStatus().catch(() => {
-  setStatus("Serveur", "Le serveur est pret, mais le statut initial n'a pas pu etre lu.");
-});
-
-if (!SpeechRecognitionCtor) {
-  setVoiceState(
-    "Indisponible",
-    "La reconnaissance vocale n'est pas supportee sur ce navigateur.",
-  );
-  elements.voiceToggleButton.disabled = true;
-  elements.voiceSaveSettingsButton.disabled = true;
+  startListening();
 }
 
-loadPersistedVoiceSettings();
+function init() {
+  loadSettings();
+  syncInputs();
+  updateStatus("Pret", "Initialisation terminee", "idle");
+  updateVoiceBadge();
+  installAudioUnlockHandlers();
+  void initializeMedia();
+  setupSpeechRecognition();
+
+  if (elements.saveSettingsButton) {
+    elements.saveSettingsButton.addEventListener("click", saveSettings);
+  }
+  if (elements.toggleVoiceButton) {
+    elements.toggleVoiceButton.addEventListener("click", toggleListening);
+  }
+
+  // Hands-free mode: start listening automatically for end users.
+  startListening();
+}
+
+window.addEventListener("DOMContentLoaded", init);

@@ -19,6 +19,7 @@ class VideoFrameEnvelope:
   width: int
   height: int
   pts: int | None
+  jpeg_base64: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +116,7 @@ class NoOpAnalyzer(AnalyzerPort):
   def __init__(self) -> None:
     self._metrics = AnalyzerMetrics()
     self._transcript_entries: tuple[TranscriptEntry, ...] = ()
+    self._latest_video_frame: VideoFrameEnvelope | None = None
     self._lock = Lock()
 
   def on_session_started(self, metadata: SessionMetadata) -> None:
@@ -124,10 +126,10 @@ class NoOpAnalyzer(AnalyzerPort):
                               sessions_started=self._metrics.sessions_started + 1)
 
   def on_video_frame(self, frame: VideoFrameEnvelope) -> None:
-    del frame
     with self._lock:
       self._metrics = replace(self._metrics,
                               video_frames=self._metrics.video_frames + 1)
+      self._latest_video_frame = frame
 
   def on_audio_frame(self, frame: AudioFrameEnvelope) -> None:
     del frame
@@ -168,3 +170,7 @@ class NoOpAnalyzer(AnalyzerPort):
   def clear_transcript(self) -> None:
     with self._lock:
       self._transcript_entries = ()
+
+  def get_latest_video_frame(self) -> VideoFrameEnvelope | None:
+    with self._lock:
+      return self._latest_video_frame

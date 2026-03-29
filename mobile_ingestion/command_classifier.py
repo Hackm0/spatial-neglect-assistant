@@ -54,6 +54,10 @@ _COMMAND_ALIASES: dict[str, str] = {
     "clear_transcript": "transcript_clear",
     "reset_transcript": "transcript_clear",
     "transcript_clear": "transcript_clear",
+    "spatial_detection": "spatial_detection",
+    "spatial_detect": "spatial_detection",
+    "detect_object": "spatial_detection",
+    "find_object": "spatial_detection",
 }
 
 
@@ -196,5 +200,21 @@ class CommandClassifier:
     offer_tokens = {"connect", "start", "open", "resume", "reconnect", "negotiate"}
     if tokens.intersection(offer_tokens) and tokens.intersection({"session", "stream", "webrtc", "connection"}):
       return "offer"
+
+    detection_tokens = {
+        "find",
+        "locate",
+        "spot",
+        "where",
+        "detect",
+        "localise",
+        "localiser",
+        "trouve",
+        "trouver",
+        "repere",
+        "reperer",
+    }
+    if tokens.intersection(detection_tokens) and not tokens.intersection({"status", "state", "health", "ping"}):
+      return "spatial_detection"
 
     return None

@@ -1,70 +1,1711 @@
 <!doctype html>
 <html lang="fr">
-  <head>
+<head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Mobile Ingestion</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
-  </head>
-  <body>
-    <main class="app-shell">
-      <section class="card">
-        <div class="eyebrow">Spatial Neglect Assistant</div>
-        <h1>Connexion mobile temps réel</h1>
-        <p class="description">
-          Cette page ouvre la caméra et le micro du téléphone, puis envoie le flux
-          au serveur Flask via WebRTC.
-        </p>
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=0">
+    <title>Spatial Neglect Assistant</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg: #000000;
+            /* Apple VisionOS style frosted glass */
+            --surface: rgba(255, 255, 255, 0.1);
+            --surface-strong: rgba(255, 255, 255, 0.15);
+            --border: rgba(255, 255, 255, 0.2);
+            --border-hi: rgba(255, 255, 255, 0.4);
+            --text-dim: rgba(255, 255, 255, 0.6);
+            --text-mid: rgba(255, 255, 255, 0.8);
+            --text-hi: #ffffff;
+            --text-white: #ffffff;
 
-        <div class="status-row">
-          <span class="status-label">Statut</span>
-          <span id="status-badge" class="status-badge">En attente</span>
+            /* Vibrant Apple-style semantic colors */
+            --ready: #34c759; /* Apple Green */
+            --active: #0a84ff; /* Apple Blue */
+            --warn: #ff9f0a; /* Apple Orange */
+            --danger: #ff453a; /* Apple Red */
+
+            --ready-soft: rgba(52, 199, 89, 0.25);
+            --active-soft: rgba(10, 132, 255, 0.25);
+            --warn-soft: rgba(255, 159, 10, 0.3);
+            --warn-glow: rgba(255, 159, 10, 0.5);
+            --danger-soft: rgba(255, 69, 58, 0.25);
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            user-select: none;
+            -webkit-user-select: none;
+        }
+
+        body {
+            background-color: #030406;
+            background-image: 
+                radial-gradient(circle at 15% 20%, rgba(10, 132, 255, 0.15) 0%, transparent 40%),
+                radial-gradient(circle at 85% 85%, rgba(52, 199, 89, 0.1) 0%, transparent 40%),
+                radial-gradient(circle at 50% 50%, rgba(255, 255, 255, 0.02) 0%, transparent 60%);
+            color: var(--text-hi);
+            font-family: 'DM Mono', monospace;
+            overflow: hidden;
+            width: 100vw;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        /* Z-0: Video Feed */
+        #live-feed {
+            width: 90vw;
+            height: 75vh;
+            max-width: 1200px;
+            object-fit: cover;
+            border-radius: 28px;
+            box-shadow: 
+                0 32px 64px rgba(0, 0, 0, 0.6), 
+                0 0 0 1px rgba(255, 255, 255, 0.12),
+                0 0 40px rgba(10, 132, 255, 0.1);
+            z-index: 0;
+            background: #0a0e14;
+            transition: filter 600ms ease, transform 300ms ease;
+        }
+
+        .degraded-video {
+            filter: brightness(0.4) blur(4px);
+        }
+
+        /* Z-1: Vignette */
+        .vignette {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: radial-gradient(circle at center, transparent 30%, rgba(8,11,16,0.85) 100%);
+            z-index: 1;
+            pointer-events: none;
+        }
+
+        /* Z-2: Scanlines (Optional) */
+        .scanlines {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: repeating-linear-gradient(
+                to bottom,
+                transparent 0%,
+                rgba(255, 255, 255, 0.01) 1px,
+                transparent 2px
+            );
+            z-index: 2;
+            pointer-events: none;
+            opacity: 0.5;
+        }
+
+        /* Z-10: HUD Chrome */
+        .hud {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            z-index: 10;
+            pointer-events: none;
+            overflow: hidden;
+        }
+
+        /* Ambient Orbs */
+        .ambient-orb {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(80px);
+            opacity: 0.65;
+            z-index: -1;
+            pointer-events: none;
+            animation: float-orb 14s ease-in-out infinite alternate;
+            mix-blend-mode: screen;
+        }
+
+        .orb-1 { width: 400px; height: 400px; background: rgba(10, 132, 255, 0.5); bottom: -100px; left: -100px; }
+        .orb-2 { width: 350px; height: 350px; background: rgba(255, 45, 85, 0.4); top: -100px; right: 20%; animation-delay: -5s; }
+        .orb-3 { width: 450px; height: 450px; background: rgba(52, 199, 89, 0.3); bottom: 10%; right: -100px; animation-delay: -9s; }
+
+        @keyframes float-orb {
+            0% { transform: translate(0, 0) scale(1); }
+            100% { transform: translate(40px, -50px) scale(1.15); }
+        }
+
+        .top-bar {
+            position: fixed;
+            top: 0; left: 0; right: 0;
+            height: 52px;
+            background: linear-gradient(to bottom, rgba(4,6,10,0.85) 0%, transparent 100%);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 0 20px;
+        }
+
+        .top-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .brand {
+            font-family: 'Syne', sans-serif;
+            font-weight: 700;
+            font-size: 11px;
+            text-transform: uppercase;
+            color: var(--text-white);
+            letter-spacing: 0.05em;
+        }
+
+        .brand .accent {
+            color: var(--active);
+        }
+
+        .divider {
+            width: 1px;
+            height: 12px;
+            background: var(--border-hi);
+        }
+
+        .session-id {
+            font-size: 10px;
+            color: var(--text-mid);
+        }
+
+        .top-right {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .live-badge {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 10px;
+            text-transform: uppercase;
+            color: var(--ready);
+            opacity: 0;
+            transition: opacity 300ms ease;
+        }
+
+        .live-badge.visible {
+            opacity: 1;
+        }
+
+        .live-badge .dot {
+            width: 7px;
+            height: 7px;
+            background: var(--ready);
+            border-radius: 50%;
+            animation: pulse-live 1.6s ease-in-out infinite;
+        }
+
+        @keyframes pulse-live {
+            0% { transform: scale(0.9); opacity: 0.7; }
+            50% { transform: scale(1.1); opacity: 1; }
+            100% { transform: scale(0.9); opacity: 0.7; }
+        }
+
+        .signal-bars {
+            display: flex;
+            gap: 2px;
+            align-items: flex-end;
+            height: 14px;
+        }
+
+        .signal-bars .bar {
+            width: 4px;
+            background: var(--text-dim);
+            border-radius: 1px;
+        }
+
+        .signal-bars .bar:nth-child(1) { height: 6px; }
+        .signal-bars .bar:nth-child(2) { height: 9px; }
+        .signal-bars .bar:nth-child(3) { height: 12px; }
+        .signal-bars .bar:nth-child(4) { height: 15px; }
+
+        .signal-bars[data-quality="4"] .bar { background: var(--ready); }
+        .signal-bars[data-quality="3"] .bar:not(:nth-child(4)) { background: var(--ready); }
+        .signal-bars[data-quality="2"] .bar:not(:nth-child(4)):not(:nth-child(3)) { background: var(--warn); }
+        .signal-bars[data-quality="1"] .bar:nth-child(1) { background: var(--danger); }
+
+        .ice-progress {
+            position: absolute;
+            top: 52px;
+            left: 0;
+            height: 2px;
+            width: 100%;
+            transform-origin: left;
+            transform: scaleX(0);
+            background: var(--warn);
+            transition: transform 800ms ease, background 800ms ease;
+        }
+
+        .ice-progress.connecting {
+            transform: scaleX(0.45);
+            background: var(--warn);
+            animation: shimmer-ice 1.5s infinite linear;
+        }
+
+        .ice-progress.connected {
+            transform: scaleX(1);
+            background: var(--ready);
+        }
+
+        .ice-progress.failed {
+            transform: scaleX(1);
+            background: var(--danger);
+        }
+
+        @keyframes shimmer-ice {
+            0% { opacity: 0.5; }
+            50% { opacity: 1; }
+            100% { opacity: 0.5; }
+        }
+
+        /* Subject Detection Frame */
+        .detection-frame {
+            position: absolute;
+            top: 45%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width: 220px;
+            height: 293px;
+            opacity: 0;
+            transition: opacity 300ms ease;
+        }
+
+        .detection-frame.visible {
+            opacity: 1;
+        }
+
+        .detection-frame .corner {
+            position: absolute;
+            width: 18px;
+            height: 18px;
+            border-color: var(--active);
+            border-style: solid;
+            animation: pulse-corner 2.4s ease-in-out infinite;
+        }
+
+        @keyframes pulse-corner {
+            0% { box-shadow: 0 0 0px transparent; }
+            50% { box-shadow: inset 0 0 8px var(--active-soft); }
+            100% { box-shadow: 0 0 0px transparent; }
+        }
+
+        .top-left-corner { top: 0; left: 0; border-width: 2px 0 0 2px; }
+        .top-right-corner { top: 0; right: 0; border-width: 2px 2px 0 0; }
+        .bottom-left-corner { bottom: 0; left: 0; border-width: 0 0 2px 2px; }
+        .bottom-right-corner { bottom: 0; right: 0; border-width: 0 2px 2px 0; }
+
+        .detection-label {
+            position: absolute;
+            bottom: -24px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 9px;
+            font-weight: 400;
+            letter-spacing: 0.2em;
+            color: var(--active);
+            white-space: nowrap;
+        }
+
+        /* Status Panel */
+        .status-panel {
+            position: fixed;
+            bottom: 28px;
+            left: 20px;
+            width: 230px;
+            background: var(--surface);
+            backdrop-filter: blur(18px) saturate(1.4);
+            -webkit-backdrop-filter: blur(18px) saturate(1.4);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 18px;
+            pointer-events: auto;
+            transform: translateY(12px);
+            opacity: 0;
+            transition: transform 600ms cubic-bezier(0.16,1,0.3,1), opacity 600ms cubic-bezier(0.16,1,0.3,1);
+        }
+
+        .status-panel.entered {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .status-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .status-row:last-child {
+            margin-bottom: 0;
+        }
+
+        .status-row .label {
+            font-size: 9px;
+            font-weight: 400;
+            text-transform: uppercase;
+            letter-spacing: 0.14em;
+            color: var(--text-dim);
+        }
+
+        .status-row .value {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-hi);
+        }
+
+        .status-row .value.green { color: var(--ready); }
+        .status-row .value.amber { color: var(--warn); }
+        .status-row .value.red { color: var(--danger); }
+        .status-row .value.flash-blue {
+            animation: flash-cmd 1s linear;
+        }
+
+        @keyframes flash-cmd {
+            0% { color: var(--text-hi); }
+            20% { color: var(--active); }
+            80% { color: var(--active); }
+            100% { color: var(--text-hi); }
+        }
+
+        .timer-value {
+            font-size: 15px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .separator {
+            border: none;
+            border-top: 1px solid var(--border);
+            margin: 12px 0;
+        }
+
+        .toggle-container {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+        }
+
+        .toggle-track {
+            position: relative;
+            width: 32px;
+            height: 18px;
+            background: var(--border);
+            border-radius: 9px;
+            transition: all 300ms ease;
+        }
+
+        .toggle-thumb {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 14px;
+            height: 14px;
+            background: #888;
+            border-radius: 50%;
+            transition: all 300ms ease;
+        }
+
+        .toggle-container[aria-checked="true"] .toggle-track {
+            background: var(--warn-soft);
+            box-shadow: 0 0 8px var(--warn-glow);
+        }
+
+        .toggle-container[aria-checked="true"] .toggle-thumb {
+            background: var(--warn);
+            left: 16px;
+        }
+
+        .toggle-label {
+            font-size: 13px;
+            font-weight: 500;
+            color: var(--text-hi);
+        }
+
+        .toggle-container[aria-checked="true"] .toggle-label {
+            color: var(--warn);
+        }
+
+        /* Voice Panel */
+        .voice-panel {
+            position: fixed;
+            bottom: 28px;
+            right: 20px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 10px;
+            pointer-events: auto;
+            transform: translateY(12px);
+            opacity: 0;
+            transition: transform 600ms cubic-bezier(0.16,1,0.3,1), opacity 600ms cubic-bezier(0.16,1,0.3,1);
+        }
+
+        .voice-panel.entered {
+            transform: translateY(0);
+            opacity: 1;
+        }
+
+        .wake-label {
+            font-size: 9px;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            letter-spacing: 0.14em;
+        }
+
+        .mic-button {
+            position: relative;
+            width: 52px;
+            height: 52px;
+            border-radius: 50%;
+            background: var(--surface);
+            backdrop-filter: blur(12px);
+            -webkit-backdrop-filter: blur(12px);
+            border: 1.5px solid rgba(255,255,255,0.12);
+            color: var(--text-mid);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            outline: none;
+            transition: all 300ms ease;
+        }
+
+        .mic-button:hover {
+            border-color: var(--border-hi);
+            background: var(--active-soft);
+        }
+
+        .mic-button:focus-visible {
+            box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--active);
+        }
+
+        .mic-button.listening {
+            border-color: var(--active);
+            color: var(--active);
+        }
+
+        .mic-button.listening::before,
+        .mic-button.listening::after {
+            content: '';
+            position: absolute;
+            top: -1.5px; left: -1.5px; right: -1.5px; bottom: -1.5px;
+            border-radius: 50%;
+            border: 1.5px solid var(--active);
+            animation: ripple 1.4s linear infinite;
+        }
+
+        .mic-button.listening::after {
+            animation-delay: 0.4s;
+        }
+
+        @keyframes ripple {
+            0% { transform: scale(1); opacity: 0.6; }
+            100% { transform: scale(1.35); opacity: 0; }
+        }
+
+        /* Z-20: Alert Overlay */
+        .alert-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: var(--danger-soft);
+            z-index: 20;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity 400ms ease;
+        }
+
+        .alert-overlay.visible {
+            opacity: 1;
+            pointer-events: auto;
+        }
+
+        .alert-card {
+            background: var(--surface);
+            backdrop-filter: blur(18px);
+            -webkit-backdrop-filter: blur(18px);
+            border: 1px solid var(--danger);
+            border-radius: 8px;
+            padding: 32px 48px;
+            text-align: center;
+            cursor: pointer;
+        }
+
+        .alert-title {
+            font-size: 11px;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.1em;
+            color: var(--danger);
+            margin-bottom: 8px;
+        }
+
+        .alert-sub {
+            font-size: 12px;
+            color: var(--text-hi);
+        }
+
+        @keyframes blink-ellipsis {
+            0% { opacity: 0; }
+            50% { opacity: 1; }
+            100% { opacity: 0; }
+        }
+
+        .ellipsis {
+            animation: blink-ellipsis 1s infinite;
+        }
+
+        /* Z-50: Gate Screen */
+        .gate-screen {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: #080b10;
+            z-index: 50;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            transition: opacity 600ms ease-in, visibility 600ms;
+        }
+
+        .gate-screen.hidden {
+            opacity: 0;
+            visibility: hidden;
+            pointer-events: none;
+        }
+
+        body.test-mode .gate-screen {
+            display: none !important;
+            pointer-events: none !important;
+        }
+
+        .gate-content {
+            text-align: center;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 24px;
+        }
+
+        .gate-logo {
+            font-family: 'Syne', sans-serif;
+            font-weight: 800;
+            font-size: clamp(26px, 5vw, 42px);
+            color: var(--text-white);
+        }
+
+        .gate-logo .accent {
+            color: var(--active);
+        }
+
+        .gate-sub {
+            font-size: 13px;
+            color: var(--text-dim);
+            margin-top: -16px;
+        }
+
+        .gate-btn {
+            background: var(--text-white);
+            color: #000;
+            font-family: 'DM Mono', monospace;
+            font-weight: 500;
+            font-size: 14px;
+            padding: 16px 32px;
+            border: none;
+            border-radius: 8px;
+            cursor: pointer;
+            transition: background 300ms ease;
+        }
+
+        .gate-btn:hover {
+            background: var(--text-hi);
+        }
+
+        .gate-btn:focus-visible {
+            outline: 2px solid var(--active);
+            outline-offset: 4px;
+        }
+
+        .gate-micro {
+            font-size: 11px;
+            color: var(--text-dim);
+        }
+    </style>
+</head>
+<body>
+    <h1 style="position:absolute;left:-9999px;top:auto;width:1px;height:1px;overflow:hidden;">Connexion mobile temps réel</h1>
+
+    <video id="live-feed" autoplay playsinline muted></video>
+    <div class="hud" id="hud">
+
+        <div class="top-bar">
+            <div class="top-left">
+                <span class="brand">Spatial<span class="accent">.</span></span>
+                <span class="divider"></span>
+                <span class="session-id" id="session-id">SES-XXXXX</span>
+            </div>
+            <div class="top-right">
+                <div class="live-badge" id="live-badge"><div class="dot"></div>LIVE</div>
+                <div class="signal-bars" id="signal-bars" data-quality="0">
+                    <div class="bar"></div><div class="bar"></div><div class="bar"></div><div class="bar"></div>
+                </div>
+            </div>
         </div>
-        <p id="status-detail" class="status-detail">Aucune session active.</p>
+        
+        <div class="ice-progress" id="ice-progress"></div>
 
-        <div class="voice-panel" aria-live="polite">
-          <div class="status-row voice-status-row">
-            <span class="status-label">Activation vocale</span>
-            <span id="voice-status-badge" class="status-badge voice-badge">Désactivée</span>
-          </div>
-          <div class="voice-settings-grid">
-            <label class="voice-setting-label" for="wake-phrase-input">Wake phrase</label>
-            <input id="wake-phrase-input" class="voice-setting-input" type="text" autocomplete="off" spellcheck="false" value="Ok Jarvis, Okay Jarvis">
-            <label class="voice-setting-label" for="voice-idle-timeout-input">Auto-off (sec)</label>
-            <input id="voice-idle-timeout-input" class="voice-setting-input" type="number" min="5" max="3600" step="1" value="180">
-          </div>
-          <p id="voice-status-detail" class="status-detail voice-status-detail">
-            Dites "Ok Jarvis" pour activer l'écoute de commande.
-          </p>
-          <p id="voice-last-command" class="voice-last-command">Dernière commande: aucune</p>
-          <button id="voice-save-settings-button" type="button" class="voice-save-settings-button">
-            Sauvegarder les réglages vocaux
-          </button>
-          <button id="voice-toggle-button" type="button" class="secondary voice-toggle-button">
-            Activer l'écoute vocale
-          </button>
+        <div class="detection-frame" id="detection-frame">
+            <div class="corner top-left-corner"></div>
+            <div class="corner top-right-corner"></div>
+            <div class="corner bottom-left-corner"></div>
+            <div class="corner bottom-right-corner"></div>
+            <div class="detection-label">SUJET DÉTECTÉ</div>
         </div>
 
-        <video id="local-preview" class="preview" autoplay playsinline muted></video>
-
-        <div class="button-row">
-          <button id="connect-button" type="button">Connecter</button>
-          <button id="disconnect-button" type="button" class="secondary" disabled>
-            Déconnecter
-          </button>
+        <div class="status-panel" id="status-panel">
+            <div class="status-row">
+                <span class="label">CONNEXION</span>
+                <span class="value" id="val-connexion">HORS LIGNE</span>
+            </div>
+            <div class="status-row">
+                <span class="label">LATENCE</span>
+                <span class="value" id="val-latence">-- ms</span>
+            </div>
+            <hr class="separator">
+    <!-- Timer removed -->
+            <hr class="separator">
+            <div class="status-row">
+                <span class="label">DERNIÈRE CMD</span>
+                <span class="value cmd-value" id="val-cmd">AUCUNE</span>
+            </div>
         </div>
 
-        <p id="error-message" class="error-message" hidden></p>
-      </section>
-    </main>
+        <div class="voice-panel" id="voice-panel">
+            <div class="wake-label" id="wake-label">ÉCOUTE VOCALE</div>
+            <button class="mic-button" id="mic-button" aria-label="Toggle Microphone">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                    <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                    <line x1="12" y1="19" x2="12" y2="23"></line>
+                    <line x1="8" y1="23" x2="16" y2="23"></line>
+                </svg>
+            </button>
+        </div>
+
+        {% if show_voice_controls %}
+        <div id="voice-contract-panel" style="position:fixed;right:20px;top:72px;z-index:12;width:260px;background:var(--surface-strong);border:1px solid var(--border);border-radius:10px;padding:12px;pointer-events:auto;display:flex;flex-direction:column;gap:8px;">
+            <label for="wake-phrase-input" style="font-size:9px;color:var(--text-dim);letter-spacing:0.1em;text-transform:uppercase;">Wake phrases</label>
+            <input id="wake-phrase-input" type="text" style="background:var(--bg);border:1px solid var(--border-hi);color:var(--text-hi);border-radius:6px;padding:8px;font-family:'DM Mono',monospace;">
+            <label for="voice-idle-timeout-input" style="font-size:9px;color:var(--text-dim);letter-spacing:0.1em;text-transform:uppercase;">Auto-off (s)</label>
+            <input id="voice-idle-timeout-input" type="number" min="1" style="background:var(--bg);border:1px solid var(--border-hi);color:var(--text-hi);border-radius:6px;padding:8px;font-family:'DM Mono',monospace;">
+            <div style="display:flex;gap:8px;">
+                <button id="voice-save-settings-button" type="button" style="flex:1;background:var(--active);color:var(--text-white);border:none;border-radius:6px;padding:8px;cursor:pointer;font-family:'DM Mono',monospace;">Sauver</button>
+                <button id="voice-toggle-button" type="button" style="flex:1;background:transparent;color:var(--text-hi);border:1px solid var(--border-hi);border-radius:6px;padding:8px;cursor:pointer;font-family:'DM Mono',monospace;">Toggle</button>
+            </div>
+            <p id="voice-status-badge" style="font-size:11px;color:var(--text-hi);margin:0;">Desactivee</p>
+            <p id="voice-status-detail" style="font-size:11px;color:var(--text-mid);margin:0;">Configuration vocale prete</p>
+            <p id="voice-last-command" style="font-size:11px;color:var(--text-mid);margin:0;">Aucune commande recue</p>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="alert-overlay" id="alert-overlay">
+        <div class="alert-card" id="alert-card">
+            <div class="alert-title" id="alert-title">SIGNAL PERDU</div>
+            <div class="alert-sub" id="alert-sub">Tentative de reconnexion<span class="ellipsis">...</span></div>
+        </div>
+    </div>
+
+    <div class="gate-screen" id="gate-screen"{% if show_voice_controls %} style="display:none;pointer-events:none;"{% endif %}>
+        <div class="gate-content">
+            <div class="gate-logo">Spatial<span class="accent">.</span></div>
+            <div class="gate-sub">Neglect Assistant — Ingestion Mobile</div>
+            <button class="gate-btn" id="start-btn">Démarrer la session</button>
+            <div class="gate-micro" id="gate-micro">Caméra + microphone requis</div>
+        </div>
+    </div>
+
+
 
     <script>
-      window.APP_CONFIG = {
-        iceServers: {{ ice_servers | tojson }},
-        voiceWakePhrases: {{ voice_wake_phrases | tojson }},
-        voiceIdleTimeoutSeconds: {{ voice_idle_timeout_seconds | tojson }},
-      };
+        // CONFIG injected by Flask at render time
+        const CONFIG = {
+            iceServers:        {{ ice_servers | tojson }},
+            wakePhrases:       {{ voice_wake_phrases | default('["ok jarvis"]') | tojson }},
+            voiceIdleTimeout:  {{ voice_idle_timeout_seconds | default(30) | int }},
+            sessionTimeout:    {{ session_shutdown_timeout | default(180) | int }},
+            elevenLabsAgentId: {{ elevenlabs_agent_id | default('') | tojson }},
+            offerEndpoint:     "/api/webrtc/offer",
+            closeEndpoint:     "/api/webrtc/session",
+            commandEndpoint:   "/api/webrtc/command",
+            heartbeatEndpoint: "/api/session/heartbeat"
+        };
+        
+            // Backward-compatible bootstrap object expected by legacy frontend tests.
+            window.mobileIngestionConfig = {
+                iceServers: CONFIG.iceServers,
+                voiceWakePhrases: CONFIG.wakePhrases,
+                voiceIdleTimeoutSeconds: CONFIG.voiceIdleTimeout,
+                elevenlabsAgentId: CONFIG.elevenLabsAgentId,
+                showVoiceControls: {{ show_voice_controls | tojson }}
+            };
+            if (window.mobileIngestionConfig.showVoiceControls) {
+                document.body.classList.add('test-mode');
+            }
+
+        // 1.1 Top-level State
+        const APP = {
+            state: 'IDLE',
+            sessionId: 'SES-' + Math.random().toString(36).substr(2, 5).toUpperCase(),
+            log: [],
+            bus: null,
+            webrtc: null,
+            voice: null,
+            heartbeatInterval: null,
+            reconnectAttempts: 0,
+            maxReconnectAttempts: 4,
+            reconnectBackoffMs: [1000, 2000, 4000, 8000]
+        };
+
+        // 1.4 SessionEventBus
+        class SessionEventBus extends EventTarget {
+            dispatch(type, detail = {}) {
+                this.dispatchEvent(new CustomEvent(type, { detail }));
+                APP.log.push({ t: Date.now(), type, detail });
+                if (APP.log.length > 50) APP.log.shift(); // Keep bounded
+                
+                // Debug out
+                console.debug(`[Bus] ${type}`, detail);
+            }
+            on(type, handler) {
+                this.addEventListener(type, e => handler(e.detail));
+            }
+        }
+        APP.bus = new SessionEventBus();
+
+        // 1.5 Voice Engine definition
+        class VoiceEngine {
+            constructor(config) {
+                this.wakePhrases = Array.isArray(config.wakePhrases) ? config.wakePhrases.map(w => w.toLowerCase()) : ["ok jarvis"];
+                this.idleTimeout = config.voiceIdleTimeout * 1000;
+                this.elevenLabsAgentId = typeof config.elevenLabsAgentId === 'string'
+                    ? config.elevenLabsAgentId.trim()
+                    : '';
+                this._elevenLabsConversation = null;
+                this._elevenLabsSdkPromise = null;
+                
+                const SpeechCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (SpeechCtor) {
+                    this.recognition = new SpeechCtor();
+                    this.recognition.continuous = true;
+                    this.recognition.interimResults = false;
+                    this.recognition.lang = 'fr-FR';
+                    
+                    this.recognition.onresult = (e) => this._onResult(e);
+                    this.recognition.onerror = (e) => console.warn("Speech error", e.error);
+                    this.recognition.onend = () => {
+                        if (this._listening) {
+                            try { this.recognition.start(); } catch(e) {}
+                        }
+                    };
+                }
+                
+                this._mode = this.elevenLabsAgentId ? 'elevenlabs' : 'http';
+                this._listening = false;
+                this._awaitingCommand = false;
+                this._idleTimer = null;
+            }
+
+            start() {
+                if (!this.recognition) {
+                    APP.bus.dispatch('response_received', { transcript: 'Reconnaissance vocale indisponible sur ce navigateur.' });
+                    return;
+                }
+                this._listening = true;
+                this._awaitingCommand = false;
+                try { this.recognition.start(); } catch(e) {}
+            }
+
+            stop() {
+                this._listening = false;
+                this._awaitingCommand = false;
+                clearTimeout(this._idleTimer);
+                if (this.recognition) {
+                    try { this.recognition.stop(); } catch(e) {}
+                }
+            }
+
+            toggle() {
+                if (this._listening) {
+                    this.stop();
+                    APP.bus.dispatch('agent_speaking', { active: false });
+                    transition('LIVE');
+                    return;
+                }
+                this.start();
+                transition('VOICE_ACTIVE');
+            }
+
+            _onResult(event) {
+                const result = event.results?.[event.resultIndex];
+                if (!result || !result.isFinal) return;
+                
+                const transcript = result[0].transcript;
+                const lower = transcript.toLowerCase().trim();
+
+                // Si nous utilisons ElevenLabs, le wake word connecte automatiquement l'agent.
+                if (this._mode === 'elevenlabs') {
+                    for (const phrase of this.wakePhrases) {
+                        const wakePos = lower.indexOf(phrase);
+                        if (wakePos !== -1) {
+                            const commandText = transcript.slice(wakePos + phrase.length).trim();
+                            APP.bus.dispatch('wake_word_detected', { transcript });
+                            this._activateElevenLabsAgent(commandText);
+                            return;
+                        }
+                    }
+                    return;
+                }
+
+                // --------- Mode HTTP Standard (Sans Agent ElevenLabs) ---------
+                if (this._awaitingCommand) {
+                    this._awaitingCommand = false;
+                    this._captureCommand(lower);
+                    return;
+                }
+
+                let commandText = null;
+                for (const phrase of this.wakePhrases) {
+                    const i = lower.indexOf(phrase);
+                    if (i !== -1) {
+                        commandText = transcript.slice(i + phrase.length).trim();
+                        break;
+                    }
+                }
+
+                if (commandText === null) return;
+                
+                APP.bus.dispatch('wake_word_detected', { transcript });
+                this._resetIdleTimer();
+
+                if (!commandText) {
+                    this._awaitingCommand = true;
+                    transition('VOICE_ACTIVE');
+                    APP.bus.dispatch('command_sent', { text: 'En attente de commande...' });
+                    return;
+                }
+
+                this._captureCommand(commandText);
+            }
+
+            async _captureCommand(text) {
+                if (!text) return;
+                APP.bus.dispatch('command_sent', { text });
+                transition('PROCESSING');
+                
+                try {
+                    const wantsLocator = /(où|where|find|locate|spot|trouve|trouver|reper|gauche|droite|devant)/i.test(text);
+
+                    const res = await fetch(CONFIG.commandEndpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            text: text,
+                            sessionId: APP.sessionId,
+                            forceAgent: !wantsLocator,
+                            forceLocator: wantsLocator
+                        }),
+                    });
+
+                    if (!res.ok) throw new Error("Backend non OK");
+
+                    const data = await res.json();
+                    const transcript = data.transcript || data.result?.text;
+                    APP.bus.dispatch('response_received', { transcript });
+                    
+                    if (data.audio_b64 || data.result?.audioData) {
+                        this._playAudio(data.audio_b64 || data.result.audioData);
+                    } else {
+                        this._speakTextFallback(transcript || 'Reponse recue, mais sans audio.');
+                        transition('LIVE');
+                    }
+
+                    if (data.spatialDetection || data.result?.spatialDetection) {
+                        APP.bus.dispatch('detection', { visible: true });
+                    }
+                } catch (error) {
+                    console.error("Pipeline failure", error);
+                    APP.bus.dispatch('response_received', { transcript: 'Erreur agent vocal. Reessayez.' });
+                    transition('LIVE'); // Recover
+                }
+            }
+
+            _playAudio(b64) {
+                transition('AI_SPEAKING');
+                try {
+                    const audio = new Audio("data:audio/mp3;base64," + b64);
+                    audio.onended = () => {
+                        APP.bus.dispatch('agent_speaking', { active: false });
+                        transition('LIVE');
+                    };
+                    APP.bus.dispatch('agent_speaking', { active: true });
+                    audio.play().catch(e => {
+                        console.warn("Autoplay blocked", e);
+                        this._speakTextFallback('Audio bloque par le navigateur. Reessayez ou touchez l ecran.');
+                        transition('LIVE');
+                    });
+                } catch(e) {
+                    this._speakTextFallback('Lecture audio impossible.');
+                    transition('LIVE');
+                }
+            }
+
+            _speakTextFallback(text) {
+                if (!text || !window.speechSynthesis) {
+                    return;
+                }
+                try {
+                    const utt = new SpeechSynthesisUtterance(text);
+                    utt.lang = 'fr-FR';
+                    window.speechSynthesis.cancel();
+                    window.speechSynthesis.speak(utt);
+                } catch (e) {
+                    console.warn('speechSynthesis fallback failed', e);
+                }
+            }
+
+            async _ensureElevenLabsSession() {
+                if (this._elevenLabsConversation) {
+                    return this._elevenLabsConversation;
+                }
+                if (!this.elevenLabsAgentId) {
+                    throw new Error('ELEVENLABS_AGENT_ID manquant');
+                }
+
+                if (!this._elevenLabsSdkPromise) {
+                    this._elevenLabsSdkPromise = import('https://cdn.jsdelivr.net/npm/@elevenlabs/client/+esm');
+                }
+
+                const sdkModule = await this._elevenLabsSdkPromise;
+                const Conversation = sdkModule?.Conversation;
+                if (!Conversation || typeof Conversation.startSession !== 'function') {
+                    throw new Error('SDK ElevenLabs indisponible');
+                }
+
+                console.log('[VoiceEngine] Connexion ElevenLabs avec agentId =', this.elevenLabsAgentId);
+                const agentBanner = document.getElementById('elevenlabs-agent-banner');
+                if (agentBanner) {
+                    agentBanner.textContent = 'Agent ElevenLabs utilisé : ' + this.elevenLabsAgentId;
+                }
+                this._elevenLabsConversation = await Conversation.startSession({
+                    agentId: this.elevenLabsAgentId,
+                    onConnect: () => {
+                        APP.bus.dispatch('response_received', { transcript: 'Connecté à l\'agent ElevenLabs : ' + this.elevenLabsAgentId });
+                        if (agentBanner) agentBanner.textContent = 'Connecté à l\'agent : ' + this.elevenLabsAgentId;
+                        transition('AI_SPEAKING');
+                    },
+                    onDisconnect: () => {
+                        this._elevenLabsConversation = null;
+                        APP.bus.dispatch('response_received', { transcript: 'Agent ElevenLabs deconnecte.' });
+                        transition('LIVE');
+                    },
+                    onMessage: (message) => {
+                        if (!message || typeof message !== 'object') {
+                            return;
+                        }
+                        const text = typeof message.text === 'string' ? message.text : '';
+                        if (text) {
+                            APP.bus.dispatch('response_received', { transcript: text });
+                            transition('AI_SPEAKING');
+                        }
+                    },
+                    onError: (error) => {
+                        const detail = typeof error === 'string' && error.trim()
+                            ? error.trim()
+                            : 'Erreur agent ElevenLabs';
+                        APP.bus.dispatch('response_received', { transcript: detail });
+                        transition('LIVE');
+                    },
+                });
+
+                return this._elevenLabsConversation;
+            }
+
+            async _activateElevenLabsAgent(commandText) {
+                try {
+                    // Arreter le micro local pour liberer la capture audio du SDK ElevenLabs.
+                    this.stop();
+                    transition('PROCESSING');
+                    const conversation = await this._ensureElevenLabsSession();
+                    if (commandText && typeof conversation?.sendUserMessage === 'function') {
+                        conversation.sendUserMessage(commandText);
+                        APP.bus.dispatch('command_sent', { text: commandText });
+                    }
+                } catch (error) {
+                    console.error('[VoiceEngine] Connexion ElevenLabs impossible', error);
+                    APP.bus.dispatch('response_received', { transcript: 'Connexion agent ElevenLabs impossible.' });
+                    // Fallback fiable vers le pipeline HTTP si dispo.
+                    if (commandText) {
+                        this._captureCommand(commandText);
+                    } else {
+                        transition('LIVE');
+                    }
+                }
+            }
+
+            _resetIdleTimer() {
+                clearTimeout(this._idleTimer);
+                this._idleTimer = setTimeout(() => {
+                    transition('LIVE'); // Fallback if stuck
+                }, this.idleTimeout);
+            }
+        }
+
+        // 1.6 WebRTC Manager definition
+        class WebRTCManager {
+            constructor(config) {
+                this.iceServers = Array.isArray(config.iceServers) 
+                    ? config.iceServers.map(url => typeof url === 'string' ? { urls: url } : url) 
+                    : [];
+                this.pc = null;
+                this.stream = null;
+                this._everConnected = false;
+                this._disconnectTimer = null;
+            }
+
+            async init(stream) {
+                this.stream = stream;
+                this.pc = new RTCPeerConnection({ iceServers: this.iceServers });
+                stream.getTracks().forEach(t => this.pc.addTrack(t, stream));
+
+                this.pc.oniceconnectionstatechange = () => {
+                    APP.bus.dispatch('ice_state_changed', { state: this.pc.iceConnectionState });
+                };
+                
+                this.pc.onconnectionstatechange = () => {
+                    APP.bus.dispatch('connection_state_changed', { state: this.pc.connectionState });
+                    if (this.pc.connectionState === 'connected') {
+                        this._everConnected = true;
+                        if (this._disconnectTimer) {
+                            clearTimeout(this._disconnectTimer);
+                            this._disconnectTimer = null;
+                        }
+                        APP.bus.dispatch('ice_connected');
+                    } else if (this.pc.connectionState === 'disconnected') {
+                        if (!this._everConnected) {
+                            return;
+                        }
+                        APP.bus.dispatch('ice_reconnecting');
+                        if (this._disconnectTimer) {
+                            clearTimeout(this._disconnectTimer);
+                        }
+                        this._disconnectTimer = setTimeout(() => {
+                            if (!this.pc) {
+                                return;
+                            }
+                            if (['disconnected', 'failed'].includes(this.pc.connectionState)) {
+                                APP.bus.dispatch('ice_disconnected');
+                            }
+                        }, 4000);
+                    } else if (this.pc.connectionState === 'failed') {
+                        APP.bus.dispatch('ice_failed');
+                    } else if (this.pc.connectionState === 'closed') {
+                        APP.bus.dispatch('ice_disconnected');
+                    }
+                };
+            }
+
+            async negotiate() {
+                const offer = await this.pc.createOffer();
+                await this.pc.setLocalDescription(offer);
+
+                // Wait for ICE gathering
+                await new Promise(r => {
+                    if (this.pc.iceGatheringState === 'complete') return r();
+                    this.pc.onicegatheringstatechange = () => {
+                        if (this.pc.iceGatheringState === 'complete') r();
+                    };
+                });
+
+                try {
+                    let res = await fetch(CONFIG.offerEndpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            type: this.pc.localDescription.type,
+                            sdp: this.pc.localDescription.sdp
+                        }),
+                    });
+
+                    if (res.status === 409) {
+                        // Previous session might still be active server-side; clear and retry once.
+                        await fetch(CONFIG.closeEndpoint, { method: 'DELETE' }).catch(() => {});
+                        res = await fetch(CONFIG.offerEndpoint, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                type: this.pc.localDescription.type,
+                                sdp: this.pc.localDescription.sdp
+                            }),
+                        });
+                    }
+
+                    if (!res.ok) {
+                        throw new Error(`Offer failed: HTTP ${res.status}`);
+                    }
+                    
+                    const answer = await res.json();
+                    if (answer.sdp) {
+                        await this.pc.setRemoteDescription(answer);
+                        APP.sessionId = answer.sessionId || APP.sessionId;
+                        document.getElementById('session-id').textContent = APP.sessionId;
+                    }
+                } catch(e) {
+                    APP.bus.dispatch('ice_failed');
+                }
+            }
+
+            close() {
+                if (this._disconnectTimer) {
+                    clearTimeout(this._disconnectTimer);
+                    this._disconnectTimer = null;
+                }
+                if (this.pc) this.pc.close();
+                if (this.stream) this.stream.getTracks().forEach(t => t.stop());
+            }
+        }
+
+        // 1.3 State Machine Transition function
+        function transition(newState) {
+            if (APP.state === newState) return; // Prevent loop
+            const oldState = APP.state;
+            APP.state = newState;
+            
+            APP.bus.dispatch('state_changed', { from: oldState, to: newState });
+            renderState(); // Mutate DOM once
+
+            // Handle side effects tied to entering specific states
+            switch (newState) {
+                case 'REQUESTING_PERMISSION':
+                    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: true })
+                        .then(stream => {
+                            document.getElementById('live-feed').srcObject = stream;
+                            APP.bus.dispatch('permission_granted', { stream });
+                        })
+                        .catch(err => {
+                            console.error(err);
+                            APP.bus.dispatch('response_received', {
+                                transcript: (!window.isSecureContext)
+                                    ? 'Micro/camera bloques: ouvrez l application via https (ou localhost).'
+                                    : `Permission micro/camera refusee: ${err?.name || 'erreur'}`
+                            });
+                            APP.bus.dispatch('permission_denied', { error: err });
+                        });
+                    break;
+
+                case 'CONNECTING':
+                    (async () => {
+                        try {
+                            if (APP.webrtc) {
+                                APP.webrtc.close();
+                            }
+                            APP.webrtc = new WebRTCManager(CONFIG);
+                            await APP.webrtc.init(document.getElementById('live-feed').srcObject);
+                            await APP.webrtc.negotiate();
+                            // WebRTC event bus handles the shift to LIVE or ERROR_DISCONNECTED
+                        } catch (e) {
+                            APP.bus.dispatch('ice_failed');
+                        }
+                    })();
+                    break;
+
+                case 'RECONNECTING':
+                    const retryIndex = Math.max(0, APP.reconnectAttempts - 1);
+                    const retryDelay = APP.reconnectBackoffMs[Math.min(retryIndex, APP.reconnectBackoffMs.length - 1)];
+                    setTimeout(() => {
+                        if (APP.state === 'RECONNECTING') {
+                            transition('CONNECTING');
+                        }
+                    }, retryDelay);
+                    break;
+
+                case 'LIVE':
+                    if (!APP.voice) {
+                        APP.voice = new VoiceEngine(CONFIG);
+                    }
+                    APP.voice.start();
+                    startHeartbeat();
+                    break;
+
+                case 'ERROR_DISCONNECTED':
+                case 'ERROR_ICE':
+                case 'AUTO_OFF':
+                    stopHeartbeat();
+                    if (APP.webrtc) APP.webrtc.close();
+                    if (APP.voice) APP.voice.stop();
+                    break;
+            }
+        }
+
+        // Single DOM-mutating function based strictly on APP.state
+        function renderState() {
+            const LEGACY_TEST_MODE = Boolean(window.mobileIngestionConfig?.showVoiceControls);
+            const els = {
+                gate: document.getElementById('gate-screen'),
+                gateBtn: document.getElementById('start-btn'),
+                statusPanel: document.getElementById('status-panel'),
+                voicePanel: document.getElementById('voice-panel'),
+                valConnexion: document.getElementById('val-connexion'),
+                valCmd: document.getElementById('val-cmd'),
+                iceProgress: document.getElementById('ice-progress'),
+                liveBadge: document.getElementById('live-badge'),
+                signalBars: document.getElementById('signal-bars'),
+                alertOverlay: document.getElementById('alert-overlay'),
+                micBtn: document.getElementById('mic-button'),
+                video: document.getElementById('live-feed')
+            };
+
+            // Reset ephemeral classes
+            els.iceProgress.className = 'ice-progress';
+            els.alertOverlay.classList.remove('visible');
+            els.video.classList.remove('degraded-video');
+            els.micBtn.classList.remove('listening');
+
+            switch (APP.state) {
+                case 'IDLE':
+                    if (LEGACY_TEST_MODE) {
+                        els.gate.classList.add('hidden');
+                        els.statusPanel.classList.add('entered');
+                        els.voicePanel.classList.add('entered');
+                    } else {
+                        els.gate.classList.remove('hidden');
+                        els.statusPanel.classList.remove('entered');
+                        els.voicePanel.classList.remove('entered');
+                    }
+                    break;
+
+                case 'REQUESTING_PERMISSION':
+                    els.gate.classList.remove('hidden');
+                    els.gateBtn.textContent = 'Autorisation requise...';
+                    els.gateBtn.disabled = true;
+                    break;
+
+                case 'ERROR_PERMISSION':
+                    els.gate.classList.remove('hidden');
+                    els.gateBtn.textContent = 'Erreur permission. Réessayer';
+                    els.gateBtn.disabled = false;
+                    break;
+
+                case 'CONNECTING':
+                case 'RECONNECTING':
+                    els.gate.classList.add('hidden');
+                    els.statusPanel.classList.add('entered');
+                    els.voicePanel.classList.add('entered');
+                    
+                    els.iceProgress.classList.add('connecting');
+                    els.valConnexion.textContent = 'CONNEXION...';
+                    els.valConnexion.className = 'value amber';
+                    els.liveBadge.classList.remove('visible');
+                    els.signalBars.setAttribute('data-quality', '0');
+                    break;
+
+                case 'LIVE':
+                    els.gate.classList.add('hidden');
+                    els.iceProgress.classList.add('connected');
+                    setTimeout(() => els.iceProgress.style.opacity = '0', 1000);
+                    
+                    els.valConnexion.textContent = 'PRÊT';
+                    els.valConnexion.className = 'value green';
+                    els.liveBadge.classList.add('visible');
+                    els.signalBars.setAttribute('data-quality', '4');
+                    break;
+
+                case 'DEGRADED':
+                    els.iceProgress.style.opacity = '1';
+                    els.iceProgress.classList.add('connecting');
+                    els.valConnexion.textContent = 'DÉGRADÉ';
+                    els.valConnexion.className = 'value amber';
+                    els.liveBadge.classList.remove('visible');
+                    els.signalBars.setAttribute('data-quality', '1');
+                    break;
+
+                case 'PROCESSING':
+                    els.valConnexion.textContent = 'TRAITEMENT...';
+                    els.valConnexion.className = 'value active';
+                    els.micBtn.classList.add('listening'); // Add visual feedback
+                    break;
+
+                case 'AI_SPEAKING':
+                    els.valConnexion.textContent = 'AGENT VOCAL';
+                    els.valConnexion.className = 'value active';
+                    els.micBtn.classList.add('listening'); // Ripple
+                    break;
+
+                case 'ERROR_DISCONNECTED':
+                case 'ERROR_ICE':
+                case 'AUTO_OFF':
+                    els.alertOverlay.classList.add('visible');
+                    els.video.classList.add('degraded-video');
+                    els.valConnexion.textContent = 'HORS LIGNE';
+                    els.valConnexion.className = 'value red';
+                    els.liveBadge.classList.remove('visible');
+                    els.signalBars.setAttribute('data-quality', '0');
+                    
+                    const title = document.getElementById('alert-title');
+                    const sub = document.getElementById('alert-sub');
+                    if (APP.state === 'AUTO_OFF') {
+                        title.textContent = 'SESSION TERMINÉE';
+                        sub.innerHTML = 'Auto-off déclenché<br>Appuyer pour reprendre';
+                    } else {
+                        title.textContent = 'SIGNAL PERDU';
+                        sub.innerHTML = 'Connexion interrompue<br>Cliquez pour reconnecter';
+                    }
+                    break;
+            }
+        }
+
+        // --- Heartbeat & Background Loops ---
+        function startHeartbeat() {
+            stopHeartbeat();
+            APP.heartbeatInterval = setInterval(() => {
+                if (!APP.sessionId || String(APP.sessionId).startsWith('SES-')) {
+                    return;
+                }
+                fetch(CONFIG.heartbeatEndpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ sessionId: APP.sessionId })
+                })
+                .then(async (response) => {
+                    if (!response.ok) {
+                        return;
+                    }
+                    const payload = await response.json().catch(() => null);
+                    if (!payload || typeof payload !== 'object') {
+                        return;
+                    }
+                    const canonicalSessionId = typeof payload.sessionId === 'string'
+                        ? payload.sessionId
+                        : '';
+                    if (canonicalSessionId && canonicalSessionId !== APP.sessionId) {
+                        APP.sessionId = canonicalSessionId;
+                        document.getElementById('session-id').textContent = APP.sessionId;
+                    }
+                })
+                .catch(() => {});
+            }, 5000);
+        }
+
+        function stopHeartbeat() {
+            clearInterval(APP.heartbeatInterval);
+        }
+
+        // --- View & Bus Wiring ---
+        document.addEventListener('DOMContentLoaded', () => {
+            document.getElementById('session-id').textContent = APP.sessionId;
+            
+            // Interaction bindings
+            document.getElementById('start-btn').addEventListener('click', () => {
+                if (!APP.voice) {
+                    APP.voice = new VoiceEngine(CONFIG);
+                }
+                APP.voice.start();
+                transition('REQUESTING_PERMISSION');
+            });
+
+            document.getElementById('alert-card').addEventListener('click', () => {
+                if (['ERROR_DISCONNECTED', 'ERROR_ICE', 'AUTO_OFF'].includes(APP.state)) {
+                    APP.reconnectAttempts = 0;
+                    transition('CONNECTING');
+                }
+            });
+
+            document.getElementById('mic-button').addEventListener('click', () => {
+                APP.bus.dispatch('voice_toggle');
+            });
+
+            // Bus routing
+            APP.bus.on('permission_granted', () => {
+                if (!APP.voice) {
+                    APP.voice = new VoiceEngine(CONFIG);
+                }
+                APP.voice.start();
+                transition('CONNECTING');
+            });
+            APP.bus.on('permission_denied', () => transition('ERROR_PERMISSION'));
+            APP.bus.on('ice_connected', () => {
+                APP.reconnectAttempts = 0;
+                transition('LIVE');
+            });
+            APP.bus.on('ice_failed', () => {
+                APP.reconnectAttempts += 1;
+                if (APP.reconnectAttempts <= APP.maxReconnectAttempts) {
+                    transition('RECONNECTING');
+                    return;
+                }
+                transition('ERROR_ICE');
+            });
+            APP.bus.on('ice_reconnecting', () => {
+                APP.reconnectAttempts += 1;
+                if (APP.reconnectAttempts <= APP.maxReconnectAttempts) {
+                    transition('RECONNECTING');
+                    return;
+                }
+                transition('ERROR_DISCONNECTED');
+            });
+            APP.bus.on('ice_disconnected', () => {
+                APP.reconnectAttempts += 1;
+                if (APP.reconnectAttempts <= APP.maxReconnectAttempts) {
+                    transition('RECONNECTING');
+                    return;
+                }
+                transition('ERROR_DISCONNECTED');
+            });
+            APP.bus.on('session_end', () => transition('AUTO_OFF'));
+            APP.bus.on('voice_toggle', () => {
+                if (!APP.voice) {
+                    APP.voice = new VoiceEngine(CONFIG);
+                }
+                APP.voice.toggle();
+            });
+            
+            APP.bus.on('command_sent', (payload) => {
+                const cmdVal = document.getElementById('val-cmd');
+                cmdVal.textContent = payload.text;
+                cmdVal.classList.remove('flash-blue');
+                void cmdVal.offsetWidth; // Reflow
+                cmdVal.classList.add('flash-blue');
+            });
+
+            APP.bus.on('response_received', (payload) => {
+                if (payload.transcript) {
+                    const cmdVal = document.getElementById('val-cmd');
+                    cmdVal.textContent = "AI: " + payload.transcript.substring(0, 30) + "...";
+                }
+            });
+
+            APP.bus.on('detection', (payload) => {
+                const frame = document.getElementById('detection-frame');
+                if (payload.visible) {
+                    frame.classList.add('visible');
+                    setTimeout(() => frame.classList.remove('visible'), 3000);
+                }
+            });
+
+            if (CONFIG.wakePhrases.length > 0) {
+                document.getElementById('wake-label').textContent = 'WAKE: ' + CONFIG.wakePhrases[0].toUpperCase();
+            }
+
+            // Init call
+            renderState();
+
+            // Auto-start for real users so the app does not remain stuck in OFFLINE/IDLE.
+            // Keep manual mode for test harnesses where controls are explicitly shown.
+            const isManualTestMode = Boolean(window.mobileIngestionConfig?.showVoiceControls);
+            if (!isManualTestMode) {
+                setTimeout(() => {
+                    if (APP.state !== 'IDLE') {
+                        return;
+                    }
+                    transition('REQUESTING_PERMISSION');
+                }, 150);
+            }
+
+            // Shortcut
+            document.addEventListener('keydown', (e) => {
+                if (e.key.toLowerCase() === 'm' && APP.state === 'LIVE') {
+                    APP.bus.dispatch('voice_toggle');
+                }
+            });
+
+            initLegacyVoiceControls();
+        });
+
+        function initLegacyVoiceControls() {
+            const panel = document.getElementById('voice-contract-panel');
+            if (!panel) {
+                return;
+            }
+            if (panel.dataset.bound === 'true') {
+                return;
+            }
+            panel.dataset.bound = 'true';
+
+            const storageKey = 'mobileIngestion.voiceSettings.v1';
+            const wakeInput = document.getElementById('wake-phrase-input');
+            const timeoutInput = document.getElementById('voice-idle-timeout-input');
+            const saveBtn = document.getElementById('voice-save-settings-button');
+            const toggleBtn = document.getElementById('voice-toggle-button');
+            const badge = document.getElementById('voice-status-badge');
+            const detail = document.getElementById('voice-status-detail');
+            const lastCommand = document.getElementById('voice-last-command');
+
+            let recognition = null;
+            let listening = false;
+            let idleTimer = null;
+
+            const defaults = {
+                wakePhrases: Array.isArray(CONFIG.wakePhrases) ? CONFIG.wakePhrases : ['ok jarvis', 'okay jarvis'],
+                idleTimeoutSeconds: Number(CONFIG.voiceIdleTimeout) || 180,
+            };
+            const settings = {
+                wakePhrases: [...defaults.wakePhrases],
+                idleTimeoutSeconds: defaults.idleTimeoutSeconds,
+            };
+
+            function saveLocalSettings() {
+                window.localStorage.setItem(storageKey, JSON.stringify(settings));
+            }
+
+            function loadLocalSettings() {
+                try {
+                    const raw = window.localStorage.getItem(storageKey);
+                    if (!raw) {
+                        return;
+                    }
+                    const parsed = JSON.parse(raw);
+                    if (Array.isArray(parsed.wakePhrases) && parsed.wakePhrases.length > 0) {
+                        settings.wakePhrases = parsed.wakePhrases.map((value) => String(value).toLowerCase());
+                    }
+                    if (Number.isFinite(Number(parsed.idleTimeoutSeconds))) {
+                        settings.idleTimeoutSeconds = Math.max(1, Number(parsed.idleTimeoutSeconds));
+                    }
+                } catch (error) {
+                    console.warn('Legacy voice settings parse failed', error);
+                }
+            }
+
+            function syncInputs() {
+                if (wakeInput) {
+                    wakeInput.value = settings.wakePhrases.join(', ');
+                }
+                if (timeoutInput) {
+                    timeoutInput.value = String(settings.idleTimeoutSeconds);
+                }
+            }
+
+            function refreshVoiceUi(reasonText) {
+                if (!badge || !detail) {
+                    return;
+                }
+                if (listening) {
+                    badge.textContent = 'Ecoute active';
+                    detail.textContent = reasonText || `Phrases: ${settings.wakePhrases.join(', ')} | Auto-off: ${settings.idleTimeoutSeconds}s`;
+                } else {
+                    badge.textContent = 'Desactivee';
+                    detail.textContent = reasonText || `Auto-off: ${settings.idleTimeoutSeconds}s | Phrases: ${settings.wakePhrases.join(', ')}`;
+                }
+            }
+
+            function clearIdleTimer() {
+                if (idleTimer) {
+                    window.clearTimeout(idleTimer);
+                    idleTimer = null;
+                }
+            }
+
+            function scheduleAutoOff() {
+                clearIdleTimer();
+                if (!listening) {
+                    return;
+                }
+                idleTimer = window.setTimeout(() => {
+                    listening = false;
+                    if (recognition) {
+                        try { recognition.stop(); } catch (e) {}
+                    }
+                    refreshVoiceUi(`Auto-off: ${settings.idleTimeoutSeconds}s`);
+                }, settings.idleTimeoutSeconds * 1000);
+            }
+
+            function setupRecognition() {
+                const Ctor = window.SpeechRecognition || window.webkitSpeechRecognition;
+                if (!Ctor) {
+                    return;
+                }
+                recognition = new Ctor();
+                recognition.continuous = true;
+                recognition.interimResults = false;
+                recognition.lang = 'fr-FR';
+                recognition.addEventListener('result', (event) => {
+                    const result = event.results?.[event.resultIndex];
+                    if (!result || !result.isFinal) {
+                        return;
+                    }
+                    const transcript = String(result[0]?.transcript || '').trim();
+                    if (!transcript) {
+                        return;
+                    }
+                    const lower = transcript.toLowerCase();
+                    let extracted = '';
+                    for (const phrase of settings.wakePhrases) {
+                        const pos = lower.indexOf(phrase.toLowerCase());
+                        if (pos >= 0) {
+                            extracted = transcript.slice(pos + phrase.length).trim();
+                            break;
+                        }
+                    }
+                    if (extracted && lastCommand) {
+                        lastCommand.textContent = extracted;
+                        scheduleAutoOff();
+                    }
+                });
+            }
+
+            loadLocalSettings();
+            syncInputs();
+            refreshVoiceUi();
+            setupRecognition();
+
+            if (saveBtn) {
+                saveBtn.addEventListener('click', () => {
+                    if (wakeInput) {
+                        const parsedWake = wakeInput.value
+                            .split(',')
+                            .map((value) => value.trim().toLowerCase())
+                            .filter(Boolean);
+                        settings.wakePhrases = parsedWake.length > 0 ? parsedWake : [...defaults.wakePhrases];
+                    }
+                    if (timeoutInput) {
+                        const timeoutValue = Number(timeoutInput.value);
+                        settings.idleTimeoutSeconds = Number.isFinite(timeoutValue)
+                            ? Math.max(1, timeoutValue)
+                            : defaults.idleTimeoutSeconds;
+                    }
+                    saveLocalSettings();
+                    syncInputs();
+                    refreshVoiceUi();
+                });
+            }
+
+            if (toggleBtn) {
+                toggleBtn.addEventListener('click', () => {
+                    listening = !listening;
+                    if (listening) {
+                        if (recognition) {
+                            try { recognition.start(); } catch (e) {}
+                        }
+                        scheduleAutoOff();
+                    } else {
+                        clearIdleTimer();
+                        if (recognition) {
+                            try { recognition.stop(); } catch (e) {}
+                        }
+                    }
+                    refreshVoiceUi();
+                });
+            }
+        }
+
+        initLegacyVoiceControls();
     </script>
-    <script src="{{ url_for('static', filename='app.js') }}" defer></script>
-  </body>
+</body>
 </html>

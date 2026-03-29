@@ -6,8 +6,10 @@ from typing import Any, Mapping
 from flask import Flask
 
 from mobile_ingestion.blueprints.api import api_blueprint
+from mobile_ingestion.blueprints.system_api import system_api_blueprint
 from mobile_ingestion.blueprints.ui import ui_blueprint
 from mobile_ingestion.config import AppConfig
+from mobile_ingestion.events import SessionEventBroadcaster
 from mobile_ingestion.services import ServiceContainer, build_services
 
 
@@ -20,9 +22,11 @@ def create_app(config: Mapping[str, Any] | AppConfig | None = None,
 
   service_container = services or build_services(settings)
   app.extensions["mobile_ingestion.services"] = service_container
+  app.extensions["mobile_ingestion.event_broadcaster"] = SessionEventBroadcaster()
 
   app.register_blueprint(ui_blueprint)
   app.register_blueprint(api_blueprint)
+  app.register_blueprint(system_api_blueprint)
 
   @app.get("/health")
   def health() -> tuple[dict[str, str], int]:

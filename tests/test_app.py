@@ -92,6 +92,8 @@ class FakeSessionManager:
     self.status = FakeStatus()
     self.closed = 0
     self.offers: list[SessionDescriptionDto] = []
+    self.activity_events = 0
+    self.auto_off_enabled = False
 
   def accept_offer(self, offer: SessionDescriptionDto) -> SessionDescriptionDto:
     self.offers.append(offer)
@@ -112,6 +114,22 @@ class FakeSessionManager:
     self.closed += 1
     self.status = FakeStatus()
 
+  def record_activity(self) -> None:
+    self.activity_events += 1
+
+  def set_auto_off_enabled(self, enabled: bool) -> None:
+    self.auto_off_enabled = enabled
+
+  def debug_snapshot(self) -> dict[str, object]:
+    return {
+        "state": self.status.state,
+        "sessionId": "fake-session" if self.status.active else None,
+        "connectionState": self.status.connection_state,
+        "autoOffEnabled": self.auto_off_enabled,
+        "sessionAgeSeconds": 0.0,
+        "idleSeconds": 0.0,
+    }
+
   def shutdown(self) -> None:
     self.close_active_session()
 
@@ -126,6 +144,21 @@ class FakeRuntime:
 @pytest.fixture
 def client():
   settings = AppConfig(testing=True)
+  services = ServiceContainer(
+      settings=settings,
+      runtime=FakeRuntime(),
+      analyzer=RecordingAnalyzer(),
+      session_manager=FakeSessionManager(),
+  )
+  app = create_app(settings, services=services)
+  app.config.update(TESTING=True)
+  with app.test_client() as test_client:
+    yield test_client
+
+
+@pytest.fixture
+def debug_client():
+  settings = AppConfig(testing=True, debug=True)
   services = ServiceContainer(
       settings=settings,
       runtime=FakeRuntime(),
@@ -171,10 +204,10 @@ def test_offer_route_returns_answer(client) -> None:
                          })
 
   assert response.status_code == 200
-  assert response.get_json() == {
-      "sdp": "answer-sdp",
-      "type": "answer",
-  }
+  payload = response.get_json()
+  assert payload["sdp"] == "answer-sdp"
+  assert payload["type"] == "answer"
+  assert payload["sessionId"] == "fake-session"
 
 
 def test_delete_session_is_idempotent(client) -> None:
@@ -209,10 +242,9 @@ def test_command_route_supports_nested_offer_payload(client) -> None:
   assert response.status_code == 200
   payload = response.get_json()
   assert payload["command"] == "offer"
-  assert payload["result"] == {
-      "sdp": "answer-sdp",
-      "type": "answer",
-  }
+  assert payload["result"]["sdp"] == "answer-sdp"
+  assert payload["result"]["type"] == "answer"
+  assert payload["result"]["sessionId"] == "fake-session"
 
 
 def test_command_route_supports_close_alias(client) -> None:
@@ -243,6 +275,139 @@ def test_command_route_returns_unknown_for_unhandled_command(client) -> None:
   payload = response.get_json()
   assert payload["command"] == "unknown"
   assert payload["rawCommand"] == "do-magic"
+
+
+def test_command_route_force_locator_requires_text(client) -> None:
+  response = client.post("/api/webrtc/command", json={"forceLocator": True})
+
+  assert response.status_code == 400
+  payload = response.get_json()
+  assert "forceLocator=true" in payload["error"]
+
+
+def test_command_route_force_locator_without_camera_frame_returns_guidance(client) -> None:
+  response = client.post(
+      "/api/webrtc/command",
+      json={
+          "forceLocator": True,
+      "text": "where is my wallet",
+      },
+  )
+
+  assert response.status_code == 409
+  payload = response.get_json()
+  assert payload["command"] == "agent_response"
+  assert "camera" in payload["result"]["text"].lower()
+
+
+def test_command_route_auto_routes_generic_locator_query(client) -> None:
+  response = client.post(
+      "/api/webrtc/command",
+      json={
+          "command": "ou sont mes lunettes",
+      },
+  )
+
+  assert response.status_code == 409
+  payload = response.get_json()
+  assert payload["command"] == "agent_response"
+  assert "camera" in payload["result"]["text"].lower()
+  assert payload["result"]["spatialDetection"]["visible"] is False
+
+
+def test_spatial_detection_endpoint_without_frame_returns_structured_payload(client) -> None:
+  response = client.post(
+      "/api/webrtc/spatial-detection",
+      json={
+          "text": "where is my wallet",
+      },
+  )
+
+  assert response.status_code == 409
+  payload = response.get_json()
+  assert payload["command"] == "spatial_detection"
+  assert payload["result"]["spatialDetection"]["targetObject"] == "wallet"
+  assert payload["result"]["spatialDetection"]["visible"] is False
+
+
+def test_command_route_spatial_detection_alias(client) -> None:
+  response = client.post(
+      "/api/webrtc/command",
+      json={
+          "command": "spatial_detect",
+          "payload": {
+              "targetObject": "lunettes",
+          },
+      },
+  )
+
+  assert response.status_code == 409
+  payload = response.get_json()
+  assert payload["command"] == "spatial_detection"
+  assert payload["result"]["spatialDetection"]["targetObject"] == "lunettes"
+
+
+def test_session_config_route_updates_auto_off(client) -> None:
+  offer_response = client.post(
+      "/api/webrtc/offer",
+      json={
+          "sdp": "offer-sdp",
+          "type": "offer",
+      },
+  )
+  assert offer_response.status_code == 200
+
+  session_id = client.get("/api/webrtc/status").get_json()["sessionId"]
+  response = client.post(
+      "/api/session/config",
+      json={
+          "sessionId": session_id,
+          "autoOff": True,
+      },
+  )
+
+  assert response.status_code == 200
+  assert response.get_json()["ok"] is True
+
+
+def test_session_heartbeat_requires_session(client) -> None:
+  response = client.post("/api/session/heartbeat", json={"sessionId": "missing"})
+
+  assert response.status_code == 200
+  assert response.get_json()["ok"] is False
+
+
+def test_session_heartbeat_ok_when_active(client) -> None:
+  offer_response = client.post(
+      "/api/webrtc/offer",
+      json={
+          "sdp": "offer-sdp",
+          "type": "offer",
+      },
+  )
+  assert offer_response.status_code == 200
+
+  session_id = client.get("/api/webrtc/status").get_json()["sessionId"]
+  response = client.post("/api/session/heartbeat", json={"sessionId": session_id})
+
+  assert response.status_code == 200
+  assert response.get_json()["ok"] is True
+
+
+def test_debug_route_hidden_when_debug_disabled(client) -> None:
+  response = client.get("/api/debug")
+
+  assert response.status_code == 404
+
+
+def test_debug_route_returns_payload_when_enabled(debug_client) -> None:
+  response = debug_client.get("/api/debug")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert "status" in payload
+  assert "session" in payload
+  assert "events" in payload
 
 
 def test_transcript_crud_routes(client) -> None:

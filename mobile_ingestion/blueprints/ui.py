@@ -14,4 +14,6 @@ def index() -> str:
       ice_servers=list(settings.ice_servers),
       voice_wake_phrases=list(settings.voice_wake_phrases),
       voice_idle_timeout_seconds=settings.voice_idle_timeout_seconds,
+      elevenlabs_agent_id=settings.elevenlabs_agent_id,
+      show_voice_controls=settings.testing,
   )
