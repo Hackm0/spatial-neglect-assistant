@@ -104,6 +104,12 @@ h1 {
   margin-top: 16px;
 }
 
+.debug-toggle-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
 button {
   flex: 1;
   min-height: 48px;
@@ -272,6 +278,11 @@ input[type="range"] {
   word-break: break-word;
 }
 
+.transcript-log {
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98) 0%, rgba(15, 23, 42, 0.9) 100%);
+}
+
 @media (max-width: 640px) {
   .card {
     padding: 22px;
@@ -280,6 +291,10 @@ input[type="range"] {
 
   .button-row {
     flex-direction: column;
+  }
+
+  .debug-toggle-grid {
+    grid-template-columns: 1fr;
   }
 
   .debug-header,

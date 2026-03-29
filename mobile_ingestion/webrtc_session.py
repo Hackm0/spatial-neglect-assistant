@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 from datetime import datetime, timezone
 
+from av.audio.resampler import AudioResampler
 from aiortc import (RTCConfiguration, RTCIceServer, RTCPeerConnection,
                     RTCSessionDescription)
 from aiortc.mediastreams import MediaStreamError
@@ -13,6 +14,9 @@ from mobile_ingestion.analyzer import (AudioFrameEnvelope, SessionMetadata,
 from mobile_ingestion.dto import SessionDescriptionDto
 from mobile_ingestion.session_manager import (PeerSessionPort, SessionCallbacks,
                                               SessionContext)
+from mobile_ingestion.voice import AudioChunk, PCM_SAMPLE_RATE
+
+VOICE_APPEND_WINDOW_MS = 200
 
 
 class WebRtcPeerSession(PeerSessionPort):
@@ -29,6 +33,15 @@ class WebRtcPeerSession(PeerSessionPort):
     ])
     self._peer_connection = RTCPeerConnection(configuration=self._configuration)
     self._consumer_tasks: set[asyncio.Task[None]] = set()
+    self._audio_resampler = AudioResampler(
+        format="s16",
+        layout="mono",
+        rate=PCM_SAMPLE_RATE,
+    )
+    self._voice_chunk_flush_bytes = int(PCM_SAMPLE_RATE * 2
+                                        * (VOICE_APPEND_WINDOW_MS / 1000.0))
+    self._pending_voice_pcm = bytearray()
+    self._pending_voice_received_at: datetime | None = None
     self._closed = False
     self._session_started = False
     self._session_stopped = False
@@ -113,16 +126,59 @@ class WebRtcPeerSession(PeerSessionPort):
     try:
       while True:
         frame = await track.recv()
+        received_at = datetime.now(timezone.utc)
         envelope = AudioFrameEnvelope(
             session_id=self._context.session_id,
-            received_at=datetime.now(timezone.utc),
+            received_at=received_at,
             sample_rate=int(frame.sample_rate),
             samples=int(frame.samples),
             pts=frame.pts,
         )
         self._context.analyzer.on_audio_frame(envelope)
+        for pcm_chunk in self._audio_chunks_from_frame(frame):
+          self._queue_voice_pcm(pcm_chunk, received_at)
     except (asyncio.CancelledError, MediaStreamError):
+      pass
+    finally:
+      self._flush_pending_voice_pcm()
+
+  def _audio_chunks_from_frame(self, frame: object) -> tuple[bytes, ...]:
+    resampled_frames = self._audio_resampler.resample(frame)
+    if resampled_frames is None:
+      return tuple()
+    if not isinstance(resampled_frames, list):
+      resampled_frames = [resampled_frames]
+
+    chunks: list[bytes] = []
+    for resampled_frame in resampled_frames:
+      planes = tuple(getattr(resampled_frame, "planes", ()))
+      if not planes:
+        continue
+      chunk = bytes(planes[0])
+      if chunk:
+        chunks.append(chunk)
+    return tuple(chunks)
+
+  def _queue_voice_pcm(self, pcm_chunk: bytes, received_at: datetime) -> None:
+    if not pcm_chunk:
       return
+    if self._pending_voice_received_at is None:
+      self._pending_voice_received_at = received_at
+    self._pending_voice_pcm.extend(pcm_chunk)
+    if len(self._pending_voice_pcm) >= self._voice_chunk_flush_bytes:
+      self._flush_pending_voice_pcm()
+
+  def _flush_pending_voice_pcm(self) -> None:
+    if not self._pending_voice_pcm or self._pending_voice_received_at is None:
+      return
+    self._context.voice_processor.submit_audio(
+        AudioChunk(
+            session_id=self._context.session_id,
+            pcm_s16le=bytes(self._pending_voice_pcm),
+            received_at=self._pending_voice_received_at,
+        ))
+    self._pending_voice_pcm.clear()
+    self._pending_voice_received_at = None
 
   async def _wait_for_ice_completion(self) -> None:
     if self._peer_connection.iceGatheringState == "complete":

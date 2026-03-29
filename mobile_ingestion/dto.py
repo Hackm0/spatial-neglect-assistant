@@ -6,6 +6,7 @@ from typing import Any, Mapping
 
 from mobile_ingestion.analyzer import AnalyzerMetrics
 from mobile_ingestion.arduino import ArduinoSnapshot
+from mobile_ingestion.voice import TranscriptEntry, VoiceStatus, WakeWordEvent
 from uart_protocol import ActuatorCommand, RawFrameEvent, TelemetrySnapshot
 
 
@@ -220,6 +221,99 @@ class RawFrameEventDto:
         "hexString": self.hex_string,
         "timestamp": self.timestamp,
         "status": self.status,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class TranscriptEntryDto:
+  entry_id: str
+  session_id: str
+  text: str
+  is_final: bool
+  received_at: str
+
+  @classmethod
+  def from_entry(cls, entry: TranscriptEntry) -> "TranscriptEntryDto":
+    return cls(
+        entry_id=entry.entry_id,
+        session_id=entry.session_id,
+        text=entry.text,
+        is_final=entry.is_final,
+        received_at=entry.received_at.isoformat(),
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "entryId": self.entry_id,
+        "sessionId": self.session_id,
+        "text": self.text,
+        "isFinal": self.is_final,
+        "receivedAt": self.received_at,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class WakeWordEventDto:
+  session_id: str
+  phrase: str
+  received_at: str
+  entry_id: str
+
+  @classmethod
+  def from_event(cls, event: WakeWordEvent) -> "WakeWordEventDto":
+    return cls(
+        session_id=event.session_id,
+        phrase=event.phrase,
+        received_at=event.received_at.isoformat(),
+        entry_id=event.entry_id,
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "sessionId": self.session_id,
+        "phrase": self.phrase,
+        "receivedAt": self.received_at,
+        "entryId": self.entry_id,
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceStatusDto:
+  available: bool
+  active: bool
+  session_id: str | None
+  error: str | None
+  dropped_chunks: int
+  mode_state: str
+  last_wake_word: WakeWordEventDto | None
+  entries: tuple[TranscriptEntryDto, ...]
+
+  @classmethod
+  def from_status(cls, status: VoiceStatus) -> "VoiceStatusDto":
+    return cls(
+        available=status.available,
+        active=status.active,
+        session_id=status.session_id,
+        error=status.error,
+        dropped_chunks=status.dropped_chunks,
+        mode_state=status.mode_state,
+        last_wake_word=(WakeWordEventDto.from_event(status.last_wake_word)
+                        if status.last_wake_word is not None else None),
+        entries=tuple(TranscriptEntryDto.from_entry(entry)
+                      for entry in status.entries),
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "available": self.available,
+        "active": self.active,
+        "sessionId": self.session_id,
+        "error": self.error,
+        "droppedChunks": self.dropped_chunks,
+        "modeState": self.mode_state,
+        "lastWakeWord": (self.last_wake_word.to_dict()
+                          if self.last_wake_word is not None else None),
+        "entries": [entry.to_dict() for entry in self.entries],
     }
 
 

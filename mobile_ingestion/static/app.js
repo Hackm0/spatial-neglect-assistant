@@ -2,6 +2,9 @@ const MAX_PROTOCOL_LOG_LINES = 500;
 const SERVO_MIN_ANGLE = 0;
 const SERVO_MAX_ANGLE = 180;
 const NEUTRAL_SERVO_ANGLE = 90;
+const DEFAULT_MAX_VIDEO_FPS = 5;
+const VOICE_STATUS_POLL_INTERVAL_MS = 2000;
+const VOICE_EVENT_RECONNECT_DELAY_MS = 1500;
 
 const elements = {
   connectButton: document.getElementById("connect-button"),
@@ -10,6 +13,19 @@ const elements = {
   preview: document.getElementById("local-preview"),
   statusBadge: document.getElementById("status-badge"),
   statusDetail: document.getElementById("status-detail"),
+  voiceDebugToggleButton: document.getElementById("voice-debug-toggle-button"),
+  voiceDebugPanel: document.getElementById("voice-debug-panel"),
+  voiceDebugBadge: document.getElementById("voice-debug-badge"),
+  voiceErrorMessage: document.getElementById("voice-error-message"),
+  voiceAvailabilityDetail: document.getElementById("voice-availability-detail"),
+  voiceSessionDetail: document.getElementById("voice-session-detail"),
+  voiceModeState: document.getElementById("voice-mode-state"),
+  voiceTransportDetail: document.getElementById("voice-transport-detail"),
+  voiceDroppedChunks: document.getElementById("voice-dropped-chunks"),
+  voiceLastTranscriptAt: document.getElementById("voice-last-transcript-at"),
+  voiceLastWakeWord: document.getElementById("voice-last-wake-word"),
+  voiceLastEntryId: document.getElementById("voice-last-entry-id"),
+  voiceTranscriptLog: document.getElementById("voice-transcript-log"),
   debugToggleButton: document.getElementById("debug-toggle-button"),
   arduinoDebugPanel: document.getElementById("arduino-debug-panel"),
   arduinoDebugBadge: document.getElementById("arduino-debug-badge"),
@@ -49,6 +65,18 @@ const state = {
   localStream: null,
   peerConnection: null,
   statusInterval: null,
+  voice: {
+    debugVisible: false,
+    eventSource: null,
+    statusInterval: null,
+    reconnectTimeout: null,
+    streamConnected: false,
+    status: null,
+    audioContext: null,
+    transcriptEntries: [],
+    lastTranscriptReceivedAt: null,
+    lastWakeWord: null,
+  },
   arduino: {
     debugVisible: false,
     eventSource: null,
@@ -89,6 +117,14 @@ function clearError() {
   clearMessage(elements.errorMessage);
 }
 
+function showVoiceError(message) {
+  showMessage(elements.voiceErrorMessage, message);
+}
+
+function clearVoiceError() {
+  clearMessage(elements.voiceErrorMessage);
+}
+
 function showArduinoError(message) {
   showMessage(elements.arduinoErrorMessage, message);
 }
@@ -117,6 +153,53 @@ function formatTimestamp(timestamp) {
   const date = new Date(timestamp * 1000);
   const milliseconds = String(date.getMilliseconds()).padStart(3, "0");
   return `${date.toLocaleTimeString("fr-CA", { hour12: false })}.${milliseconds}`;
+}
+
+function formatIsoTimestamp(timestamp) {
+  if (typeof timestamp !== "string" || !timestamp) {
+    return "--";
+  }
+  const date = new Date(timestamp);
+  if (Number.isNaN(date.getTime())) {
+    return "--";
+  }
+  return `${date.toLocaleTimeString("fr-CA", { hour12: false })}.${String(date.getMilliseconds()).padStart(3, "0")}`;
+}
+
+function getConfiguredVideoMaxFps() {
+  const configuredValue = Number(window.APP_CONFIG?.videoMaxFps);
+  if (!Number.isFinite(configuredValue) || configuredValue <= 0) {
+    return DEFAULT_MAX_VIDEO_FPS;
+  }
+  return configuredValue;
+}
+
+function buildVideoConstraints() {
+  const maxFps = getConfiguredVideoMaxFps();
+  return {
+    facingMode: { ideal: "environment" },
+    width: { ideal: 1280 },
+    height: { ideal: 720 },
+    frameRate: {
+      ideal: maxFps,
+      max: maxFps,
+    },
+  };
+}
+
+async function enforceVideoTrackConstraints(stream) {
+  const [videoTrack] = stream.getVideoTracks();
+  if (!videoTrack || typeof videoTrack.applyConstraints !== "function") {
+    return;
+  }
+
+  try {
+    await videoTrack.applyConstraints({
+      frameRate: getConfiguredVideoMaxFps(),
+    });
+  } catch (error) {
+    console.warn("Impossible de limiter la cadence video.", error);
+  }
 }
 
 function formatAxis(value, unit, isValid) {
@@ -161,6 +244,294 @@ function appendProtocolLogLine(frame) {
     );
   }
   renderProtocolLog();
+}
+
+function updateVoiceDebugVisibility() {
+  elements.voiceDebugPanel.hidden = !state.voice.debugVisible;
+  elements.voiceDebugToggleButton.textContent = state.voice.debugVisible
+    ? "Masquer le voice debug"
+    : "Activer le voice debug";
+}
+
+function shouldMaintainVoiceMonitoring() {
+  return state.peerConnection !== null || state.localStream !== null;
+}
+
+function renderVoiceTransportDetail() {
+  let detail = "Inactif";
+  if (state.voice.reconnectTimeout !== null) {
+    detail = "Reconnexion SSE...";
+  } else if (state.voice.streamConnected) {
+    detail = "SSE + polling";
+  } else if (state.voice.statusInterval !== null) {
+    detail = "Polling secours";
+  }
+  elements.voiceTransportDetail.textContent = detail;
+}
+
+function recordVoiceTranscriptTimestamp(timestamp) {
+  if (typeof timestamp !== "string" || !timestamp) {
+    return;
+  }
+  state.voice.lastTranscriptReceivedAt = timestamp;
+  elements.voiceLastTranscriptAt.textContent =
+    formatIsoTimestamp(state.voice.lastTranscriptReceivedAt);
+}
+
+function extractLatestTranscriptTimestamp(entries) {
+  let latestTimestamp = null;
+
+  entries.forEach((entry) => {
+    if (typeof entry?.receivedAt !== "string" || !entry.receivedAt) {
+      return;
+    }
+    const parsedDate = new Date(entry.receivedAt);
+    if (Number.isNaN(parsedDate.getTime())) {
+      return;
+    }
+    if (latestTimestamp === null || parsedDate > new Date(latestTimestamp)) {
+      latestTimestamp = entry.receivedAt;
+    }
+  });
+
+  return latestTimestamp;
+}
+
+function renderVoiceTranscript() {
+  const lines = state.voice.transcriptEntries.map((entry) => {
+    const prefix = entry.isFinal ? "[final]" : "[live ]";
+    return `${formatIsoTimestamp(entry.receivedAt)} ${prefix} ${entry.text}`;
+  });
+  elements.voiceTranscriptLog.textContent = lines.join("\n");
+  elements.voiceTranscriptLog.scrollTop = elements.voiceTranscriptLog.scrollHeight;
+}
+
+function renderVoiceWakeWord() {
+  const wakeWord = state.voice.lastWakeWord;
+  elements.voiceLastWakeWord.textContent = wakeWord
+    ? `${wakeWord.phrase} @ ${formatIsoTimestamp(wakeWord.receivedAt)}`
+    : "--";
+  elements.voiceLastEntryId.textContent = wakeWord?.entryId || "--";
+}
+
+function applyVoiceStatus(status) {
+  state.voice.status = status;
+  state.voice.transcriptEntries = Array.isArray(status.entries)
+    ? [...status.entries]
+    : [];
+  state.voice.lastWakeWord = status.lastWakeWord || null;
+  const latestTranscriptTimestamp = extractLatestTranscriptTimestamp(
+      state.voice.transcriptEntries,
+  );
+  if (latestTranscriptTimestamp !== null) {
+    recordVoiceTranscriptTimestamp(latestTranscriptTimestamp);
+  }
+  elements.voiceDebugBadge.textContent = status.active ? "Actif" : "Inactif";
+  elements.voiceAvailabilityDetail.textContent = status.available
+    ? "Prêt côté serveur"
+    : (status.error || "Indisponible");
+  elements.voiceSessionDetail.textContent = status.sessionId || "--";
+  elements.voiceModeState.textContent = status.modeState || "idle";
+  renderVoiceTransportDetail();
+  elements.voiceDroppedChunks.textContent = String(status.droppedChunks || 0);
+  if (status.error) {
+    showVoiceError(status.error);
+  } else {
+    clearVoiceError();
+  }
+  renderVoiceWakeWord();
+  renderVoiceTranscript();
+}
+
+function upsertVoiceTranscriptEntry(entry) {
+  const currentIndex = state.voice.transcriptEntries.findIndex(
+      (candidate) => candidate.entryId === entry.entryId,
+  );
+  if (currentIndex >= 0) {
+    state.voice.transcriptEntries.splice(currentIndex, 1, entry);
+  } else {
+    state.voice.transcriptEntries.push(entry);
+  }
+  recordVoiceTranscriptTimestamp(entry.receivedAt);
+  renderVoiceTranscript();
+}
+
+function ensureVoiceAudioContext() {
+  if (state.voice.audioContext) {
+    if (state.voice.audioContext.state === "suspended") {
+      state.voice.audioContext.resume().catch((error) => {
+        console.error(error);
+      });
+    }
+    return;
+  }
+
+  const AudioContextConstructor = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextConstructor) {
+    return;
+  }
+  state.voice.audioContext = new AudioContextConstructor();
+  if (state.voice.audioContext.state === "suspended") {
+    state.voice.audioContext.resume().catch((error) => {
+      console.error(error);
+    });
+  }
+}
+
+function playWakeWordTone() {
+  ensureVoiceAudioContext();
+  if (!state.voice.audioContext) {
+    return;
+  }
+
+  const audioContext = state.voice.audioContext;
+  const startAt = audioContext.currentTime + 0.01;
+  const oscillator = audioContext.createOscillator();
+  const gainNode = audioContext.createGain();
+  oscillator.type = "triangle";
+  oscillator.frequency.setValueAtTime(740, startAt);
+  oscillator.frequency.linearRampToValueAtTime(1040, startAt + 0.12);
+  gainNode.gain.setValueAtTime(0.0001, startAt);
+  gainNode.gain.linearRampToValueAtTime(0.12, startAt + 0.02);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, startAt + 0.2);
+  oscillator.connect(gainNode);
+  gainNode.connect(audioContext.destination);
+  oscillator.start(startAt);
+  oscillator.stop(startAt + 0.22);
+}
+
+async function fetchVoiceStatus() {
+  const payload = await requestJson("/api/voice/status");
+  applyVoiceStatus(payload);
+}
+
+function clearVoiceReconnectTimer() {
+  if (state.voice.reconnectTimeout !== null) {
+    window.clearTimeout(state.voice.reconnectTimeout);
+    state.voice.reconnectTimeout = null;
+    renderVoiceTransportDetail();
+  }
+}
+
+function scheduleVoiceEventStreamReconnect() {
+  if (state.voice.reconnectTimeout !== null || !shouldMaintainVoiceMonitoring()) {
+    return;
+  }
+
+  state.voice.reconnectTimeout = window.setTimeout(() => {
+    state.voice.reconnectTimeout = null;
+    renderVoiceTransportDetail();
+
+    if (!shouldMaintainVoiceMonitoring()) {
+      return;
+    }
+    openVoiceEventStream();
+  }, VOICE_EVENT_RECONNECT_DELAY_MS);
+  renderVoiceTransportDetail();
+}
+
+function closeVoiceEventStream() {
+  if (state.voice.eventSource) {
+    state.voice.eventSource.close();
+    state.voice.eventSource = null;
+  }
+  state.voice.streamConnected = false;
+  renderVoiceTransportDetail();
+}
+
+function openVoiceEventStream() {
+  if (!shouldMaintainVoiceMonitoring()) {
+    return;
+  }
+
+  closeVoiceEventStream();
+  const eventSource = new EventSource("/api/voice/events");
+  state.voice.eventSource = eventSource;
+
+  eventSource.addEventListener("open", () => {
+    if (state.voice.eventSource !== eventSource) {
+      return;
+    }
+    state.voice.streamConnected = true;
+    clearVoiceReconnectTimer();
+    renderVoiceTransportDetail();
+    if (!state.voice.status?.error) {
+      clearVoiceError();
+    }
+  });
+
+  eventSource.addEventListener("status", (event) => {
+    const payload = JSON.parse(event.data);
+    applyVoiceStatus(payload);
+  });
+
+  eventSource.addEventListener("transcript", (event) => {
+    const payload = JSON.parse(event.data);
+    upsertVoiceTranscriptEntry(payload);
+  });
+
+  eventSource.addEventListener("wake-word", (event) => {
+    const payload = JSON.parse(event.data);
+    state.voice.lastWakeWord = payload;
+    renderVoiceWakeWord();
+    playWakeWordTone();
+  });
+
+  eventSource.addEventListener("error", () => {
+    if (state.voice.eventSource !== eventSource) {
+      return;
+    }
+
+    closeVoiceEventStream();
+    scheduleVoiceEventStreamReconnect();
+    fetchVoiceStatus().catch((error) => {
+      console.error(error);
+    });
+
+    if (state.voice.debugVisible) {
+      showVoiceError("Le flux temps reel voix a ete interrompu. Reconnexion en cours.");
+    }
+  });
+}
+
+function startVoiceStatusPolling() {
+  stopVoiceStatusPolling();
+  state.voice.statusInterval = window.setInterval(() => {
+    fetchVoiceStatus().catch((error) => {
+      console.error(error);
+      if (state.voice.debugVisible) {
+        showVoiceError("Impossible de recuperer le statut voix en secours.");
+      }
+    });
+  }, VOICE_STATUS_POLL_INTERVAL_MS);
+  renderVoiceTransportDetail();
+}
+
+function stopVoiceStatusPolling() {
+  if (state.voice.statusInterval !== null) {
+    window.clearInterval(state.voice.statusInterval);
+    state.voice.statusInterval = null;
+    renderVoiceTransportDetail();
+  }
+}
+
+function resetVoiceState() {
+  clearVoiceReconnectTimer();
+  state.voice.status = null;
+  state.voice.transcriptEntries = [];
+  state.voice.lastTranscriptReceivedAt = null;
+  state.voice.lastWakeWord = null;
+  state.voice.streamConnected = false;
+  elements.voiceDebugBadge.textContent = "Inactif";
+  elements.voiceAvailabilityDetail.textContent = "--";
+  elements.voiceSessionDetail.textContent = "--";
+  elements.voiceModeState.textContent = "idle";
+  elements.voiceTransportDetail.textContent = "Inactif";
+  elements.voiceDroppedChunks.textContent = "0";
+  elements.voiceLastTranscriptAt.textContent = "--";
+  clearVoiceError();
+  renderVoiceWakeWord();
+  renderVoiceTranscript();
 }
 
 function setArduinoManualControlsEnabled(isEnabled) {
@@ -326,25 +697,30 @@ async function requestJson(url, options = {}) {
 async function requestLocalStream() {
   const preferredConstraints = {
     audio: true,
-    video: {
-      facingMode: { ideal: "environment" },
-      width: { ideal: 1280 },
-      height: { ideal: 720 },
-    },
+    video: buildVideoConstraints(),
   };
 
   try {
-    return await navigator.mediaDevices.getUserMedia(preferredConstraints);
+    const stream = await navigator.mediaDevices.getUserMedia(preferredConstraints);
+    await enforceVideoTrackConstraints(stream);
+    return stream;
   } catch (error) {
     if (error.name !== "OverconstrainedError" && error.name !== "NotFoundError") {
       throw error;
     }
   }
 
-  return navigator.mediaDevices.getUserMedia({
+  const fallbackStream = await navigator.mediaDevices.getUserMedia({
     audio: true,
-    video: true,
+    video: {
+      frameRate: {
+        ideal: getConfiguredVideoMaxFps(),
+        max: getConfiguredVideoMaxFps(),
+      },
+    },
   });
+  await enforceVideoTrackConstraints(fallbackStream);
+  return fallbackStream;
 }
 
 function buildPeerConnection() {
@@ -410,6 +786,8 @@ function stopStatusPolling() {
 
 async function connect() {
   clearError();
+  clearVoiceError();
+  ensureVoiceAudioContext();
 
   if (!window.isSecureContext && window.location.hostname !== "localhost") {
     showError("Le navigateur mobile exige HTTPS pour ouvrir camera et micro.");
@@ -446,6 +824,9 @@ async function connect() {
 
     await state.peerConnection.setRemoteDescription(payload);
     setStatus("Streaming", "Le flux mobile est connecte au serveur.");
+    await fetchVoiceStatus();
+    startVoiceStatusPolling();
+    openVoiceEventStream();
     startStatusPolling();
   } catch (error) {
     console.error(error);
@@ -459,6 +840,8 @@ async function disconnect(options = {}) {
   const { notifyServer = true, preserveStatus = false } = options;
 
   stopStatusPolling();
+  stopVoiceStatusPolling();
+  clearVoiceReconnectTimer();
 
   if (state.peerConnection) {
     state.peerConnection.getSenders().forEach((sender) => sender.track?.stop());
@@ -485,6 +868,9 @@ async function disconnect(options = {}) {
   if (!preserveStatus) {
     setStatus("En attente", "Aucune session active.");
   }
+
+  closeVoiceEventStream();
+  resetVoiceState();
 }
 
 async function fetchArduinoStatus() {
@@ -611,6 +997,11 @@ function updateArduinoDebugVisibility() {
     : "Activer le debug Arduino";
 }
 
+function toggleVoiceDebugPanel() {
+  state.voice.debugVisible = !state.voice.debugVisible;
+  updateVoiceDebugVisibility();
+}
+
 async function toggleArduinoDebugPanel() {
   if (!state.arduino.debugVisible) {
     state.arduino.debugVisible = true;
@@ -667,6 +1058,11 @@ elements.disconnectButton.addEventListener("click", () => {
     console.error(error);
     showError("La deconnexion a echoue.");
   });
+});
+
+elements.voiceDebugToggleButton.addEventListener("click", () => {
+  ensureVoiceAudioContext();
+  toggleVoiceDebugPanel();
 });
 
 elements.debugToggleButton.addEventListener("click", () => {
@@ -749,6 +1145,9 @@ elements.arduinoAllStopButton.addEventListener("click", () => {
 
 window.addEventListener("beforeunload", () => {
   stopStatusPolling();
+  stopVoiceStatusPolling();
+  clearVoiceReconnectTimer();
+  closeVoiceEventStream();
   closeArduinoEventStream();
   if (state.peerConnection) {
     state.peerConnection.close();
@@ -758,6 +1157,8 @@ window.addEventListener("beforeunload", () => {
   }
 });
 
+updateVoiceDebugVisibility();
+resetVoiceState();
 updateArduinoDebugVisibility();
 setArduinoManualControlsEnabled(false);
 applyArduinoTelemetry(null);
@@ -765,4 +1166,9 @@ renderProtocolLog();
 
 fetchStatus().catch(() => {
   setStatus("Serveur", "Le serveur est pret, mais le statut initial n'a pas pu etre lu.");
+});
+
+fetchVoiceStatus().catch(() => {
+  elements.voiceAvailabilityDetail.textContent =
+    "Le statut voix initial n'a pas pu etre lu.";
 });

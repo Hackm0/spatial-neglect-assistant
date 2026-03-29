@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import queue
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 
 import pytest
 
@@ -12,6 +13,9 @@ from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoEvent,
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto
 from mobile_ingestion.services import ServiceContainer
+from mobile_ingestion.voice import (TranscriptEntry, VoiceEvent,
+                                    VoiceStatus, VoiceSubscription,
+                                    WakeWordEvent)
 from uart_protocol import ActuatorCommand
 
 
@@ -208,6 +212,60 @@ class FakeRuntime:
     del timeout
 
 
+class FakeVoiceProcessor:
+
+  def __init__(self) -> None:
+    received_at = datetime.now(timezone.utc)
+    self.status = VoiceStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        error=None,
+        dropped_chunks=0,
+        mode_state="idle",
+        last_wake_word=WakeWordEvent(
+            session_id="voice-session",
+            phrase="okay jarvis",
+            received_at=received_at,
+            entry_id="entry-one",
+        ),
+        entries=(
+            TranscriptEntry(
+                entry_id="entry-one",
+                session_id="voice-session",
+                text="bonjour",
+                is_final=True,
+                received_at=received_at,
+            ),
+        ),
+    )
+    self.events: "queue.Queue[VoiceEvent | None]" = queue.Queue()
+    self.events.put(VoiceEvent("status", self.status))
+    self.events.put(None)
+
+  def start_session(self, session_id: str) -> None:
+    self.status = replace(self.status, session_id=session_id, active=True)
+
+  def submit_audio(self, chunk: object) -> None:
+    del chunk
+
+  def stop_session(self, session_id: str) -> None:
+    if self.status.session_id == session_id:
+      self.status = replace(self.status, session_id=None, active=False)
+
+  def snapshot(self) -> VoiceStatus:
+    return self.status
+
+  def subscribe(self) -> VoiceSubscription:
+    return VoiceSubscription(1, self.events)
+
+  def unsubscribe(self, subscription: VoiceSubscription) -> None:
+    del subscription
+
+  def shutdown(self) -> None:
+    self.status = replace(self.status, active=False, session_id=None)
+
+
 @pytest.fixture
 def client():
   settings = AppConfig(testing=True)
@@ -217,6 +275,7 @@ def client():
       analyzer=RecordingAnalyzer(),
       session_manager=FakeSessionManager(),
       arduino_controller=FakeArduinoController(),
+      voice_processor=FakeVoiceProcessor(),
   )
   app = create_app(settings, services=services)
   app.config.update(TESTING=True)
@@ -231,6 +290,9 @@ def test_index_renders(client) -> None:
   body = response.get_data(as_text=True)
   assert "Connexion mobile temps réel" in body
   assert "Debug Arduino" in body
+  assert "Voice debug" in body
+  assert "videoMaxFps" in body
+  assert "Dernière transcription" in body
 
 
 def test_status_route_returns_json(client) -> None:
@@ -272,6 +334,16 @@ def test_arduino_status_route_returns_json(client) -> None:
   assert payload["available"] is True
   assert payload["connected"] is False
   assert payload["debugEnabled"] is False
+
+
+def test_voice_status_route_returns_json(client) -> None:
+  response = client.get("/api/voice/status")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["available"] is True
+  assert payload["modeState"] == "idle"
+  assert payload["entries"][0]["text"] == "bonjour"
 
 
 def test_arduino_connect_route_returns_status_snapshot(client) -> None:
@@ -337,3 +409,12 @@ def test_arduino_events_route_streams_sse(client) -> None:
   assert response.status_code == 200
   assert b"event: status" in body
   assert b"debugEnabled" in body
+
+
+def test_voice_events_route_streams_sse(client) -> None:
+  response = client.get("/api/voice/events")
+  body = b"".join(response.response)
+
+  assert response.status_code == 200
+  assert b"event: status" in body
+  assert b"modeState" in body

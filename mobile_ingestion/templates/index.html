@@ -33,11 +33,80 @@
 
         <p id="error-message" class="error-message" hidden></p>
 
-        <div class="debug-toggle-row">
+        <div class="debug-toggle-row debug-toggle-grid">
+          <button id="voice-debug-toggle-button" type="button" class="ghost-button">
+            Activer le voice debug
+          </button>
           <button id="debug-toggle-button" type="button" class="ghost-button">
             Activer le debug Arduino
           </button>
         </div>
+
+        <section id="voice-debug-panel" class="debug-panel" hidden>
+          <div class="debug-header">
+            <div>
+              <h2>Voice debug</h2>
+              <p class="debug-description">
+                Affiche la transcription temps réel côté serveur et les détections
+                de wake word issues du flux audio WebRTC.
+              </p>
+            </div>
+            <span id="voice-debug-badge" class="status-badge subtle">Inactif</span>
+          </div>
+
+          <p id="voice-error-message" class="error-message" hidden></p>
+
+          <div class="debug-grid">
+            <section class="debug-block">
+              <h3>État voix</h3>
+              <dl class="debug-stats">
+                <div>
+                  <dt>Disponibilité</dt>
+                  <dd id="voice-availability-detail">--</dd>
+                </div>
+                <div>
+                  <dt>Session</dt>
+                  <dd id="voice-session-detail">--</dd>
+                </div>
+                <div>
+                  <dt>Mode</dt>
+                  <dd id="voice-mode-state">idle</dd>
+                </div>
+                <div>
+                  <dt>Transport</dt>
+                  <dd id="voice-transport-detail">Inactif</dd>
+                </div>
+                <div>
+                  <dt>Chunks perdus</dt>
+                  <dd id="voice-dropped-chunks">0</dd>
+                </div>
+                <div>
+                  <dt>Dernière transcription</dt>
+                  <dd id="voice-last-transcript-at">--</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section class="debug-block">
+              <h3>Wake word</h3>
+              <dl class="debug-stats">
+                <div>
+                  <dt>Dernière détection</dt>
+                  <dd id="voice-last-wake-word">--</dd>
+                </div>
+                <div>
+                  <dt>Entrée</dt>
+                  <dd id="voice-last-entry-id">--</dd>
+                </div>
+              </dl>
+            </section>
+
+            <section class="debug-block debug-block-wide">
+              <h3>Transcript live</h3>
+              <pre id="voice-transcript-log" class="protocol-log transcript-log"></pre>
+            </section>
+          </div>
+        </section>
 
         <section id="arduino-debug-panel" class="debug-panel" hidden>
           <div class="debug-header">
@@ -190,8 +259,9 @@
     <script>
       window.APP_CONFIG = {
         iceServers: {{ ice_servers | tojson }},
+        videoMaxFps: {{ video_max_fps | tojson }},
       };
     </script>
-    <script src="{{ url_for('static', filename='app.js', v='20260328-2') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js', v='20260329-voice-fallback1') }}" defer></script>
   </body>
 </html>

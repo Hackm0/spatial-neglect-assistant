@@ -10,6 +10,7 @@ from mobile_ingestion.analyzer import AnalyzerPort
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto, SessionStatusDto
 from mobile_ingestion.runtime import AsyncioRunner
+from mobile_ingestion.voice import VoiceProcessingPort
 
 
 class SessionBusyError(RuntimeError):
@@ -25,6 +26,7 @@ class SessionContext:
   session_id: str
   started_at: datetime
   analyzer: AnalyzerPort
+  voice_processor: VoiceProcessingPort
   settings: AppConfig
 
 
@@ -53,10 +55,11 @@ PeerSessionFactory = Callable[[SessionContext, SessionCallbacks], PeerSessionPor
 class SessionManager:
 
   def __init__(self, *, runtime: AsyncioRunner, analyzer: AnalyzerPort,
-               settings: AppConfig,
+               voice_processor: VoiceProcessingPort, settings: AppConfig,
                session_factory: PeerSessionFactory) -> None:
     self._runtime = runtime
     self._analyzer = analyzer
+    self._voice_processor = voice_processor
     self._settings = settings
     self._session_factory = session_factory
     self._lock = Lock()
@@ -117,6 +120,7 @@ class SessionManager:
           session_id=str(uuid4()),
           started_at=datetime.now(timezone.utc),
           analyzer=self._analyzer,
+          voice_processor=self._voice_processor,
           settings=self._settings,
       )
       callbacks = SessionCallbacks(
@@ -135,7 +139,12 @@ class SessionManager:
       self._has_audio_track = False
       self._started_at = context.started_at
       self._error = None
-      return session
+    try:
+      self._voice_processor.start_session(context.session_id)
+    except Exception:
+      self._set_idle_state()
+      raise
+    return session
 
   def _safe_close(self, session: PeerSessionPort) -> None:
     try:
@@ -172,8 +181,10 @@ class SessionManager:
       self._error = message
 
   def _clear_closed_session(self) -> None:
+    session_id = None
     with self._lock:
       had_error = self._state == "error"
+      session_id = self._session_id
       self._session = None
       self._session_id = None
       self._connection_state = "closed"
@@ -182,9 +193,13 @@ class SessionManager:
       self._started_at = None
       if not had_error:
         self._state = "idle"
+    if session_id is not None:
+      self._voice_processor.stop_session(session_id)
 
   def _set_idle_state(self) -> None:
+    session_id = None
     with self._lock:
+      session_id = self._session_id
       self._session = None
       self._session_id = None
       self._state = "idle"
@@ -193,3 +208,5 @@ class SessionManager:
       self._has_audio_track = False
       self._started_at = None
       self._error = None
+    if session_id is not None:
+      self._voice_processor.stop_session(session_id)
