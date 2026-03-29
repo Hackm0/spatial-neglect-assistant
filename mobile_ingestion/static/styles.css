@@ -72,6 +72,10 @@ h1 {
   margin-bottom: 8px;
 }
 
+.status-row.compact {
+  margin-bottom: 10px;
+}
+
 .status-label {
   font-weight: 600;
 }
@@ -92,6 +96,65 @@ h1 {
   background: linear-gradient(135deg, #dbece5 0%, #c2e7da 100%);
   object-fit: cover;
   border: 1px solid rgba(15, 118, 110, 0.16);
+}
+
+.object-search-panel {
+  margin-top: 18px;
+  padding: 18px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.74);
+  border: 1px solid rgba(17, 24, 39, 0.08);
+}
+
+.status-detail.compact {
+  margin-bottom: 10px;
+}
+
+.object-search-target-row {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.object-search-model-controls {
+  align-items: center;
+  margin-top: 12px;
+  margin-bottom: 0;
+}
+
+.object-search-model-label {
+  min-width: 170px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.object-search-model-select {
+  min-width: 0;
+}
+
+.status-badge[data-state="found"] {
+  background: rgba(22, 163, 74, 0.14);
+  color: #166534;
+}
+
+.status-badge[data-state="searching"],
+.status-badge[data-state="loading"],
+.status-badge[data-state="ready"],
+.status-badge[data-state="resolving_target"],
+.status-badge[data-state="awaiting_request"] {
+  background: rgba(15, 118, 110, 0.12);
+  color: var(--accent-strong);
+}
+
+.status-badge[data-state="error"] {
+  background: rgba(180, 35, 24, 0.14);
+  color: var(--danger);
+}
+
+.status-badge[data-state="unavailable"],
+.status-badge[data-state="idle"] {
+  background: rgba(100, 116, 139, 0.12);
+  color: #334155;
 }
 
 .button-row {

@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Any, Mapping
 
 from mobile_ingestion.analyzer import AnalyzerMetrics
+from mobile_ingestion.object_search import ObjectSearchStatus
 from mobile_ingestion.arduino import ArduinoSnapshot
 from mobile_ingestion.voice import TranscriptEntry, VoiceStatus, WakeWordEvent
 from uart_protocol import ActuatorCommand, RawFrameEvent, TelemetrySnapshot
@@ -314,6 +315,56 @@ class VoiceStatusDto:
         "lastWakeWord": (self.last_wake_word.to_dict()
                           if self.last_wake_word is not None else None),
         "entries": [entry.to_dict() for entry in self.entries],
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ObjectSearchStatusDto:
+  available: bool
+  active: bool
+  session_id: str | None
+  state: str
+  target_label: str | None
+  detected: bool
+  last_detected_at: str | None
+  error: str | None
+  model_ready: bool
+  model_state: str
+  model_detail: str | None
+  selected_vision_model: str | None
+
+  @classmethod
+  def from_status(cls, status: ObjectSearchStatus) -> "ObjectSearchStatusDto":
+    return cls(
+        available=status.available,
+        active=status.active,
+        session_id=status.session_id,
+        state=status.state,
+        target_label=status.target_label,
+        detected=status.detected,
+        last_detected_at=(status.last_detected_at.isoformat()
+                          if status.last_detected_at is not None else None),
+        error=status.error,
+        model_ready=status.model_ready,
+        model_state=status.model_state,
+        model_detail=status.model_detail,
+        selected_vision_model=status.selected_vision_model,
+    )
+
+  def to_dict(self) -> dict[str, object]:
+    return {
+        "available": self.available,
+        "active": self.active,
+        "sessionId": self.session_id,
+        "state": self.state,
+        "targetLabel": self.target_label,
+        "detected": self.detected,
+        "lastDetectedAt": self.last_detected_at,
+        "error": self.error,
+        "modelReady": self.model_ready,
+        "modelState": self.model_state,
+        "modelDetail": self.model_detail,
+        "selectedVisionModel": self.selected_vision_model,
     }
 
 

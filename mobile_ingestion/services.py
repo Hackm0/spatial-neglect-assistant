@@ -6,6 +6,11 @@ from dataclasses import dataclass
 from mobile_ingestion.analyzer import AnalyzerPort, NoOpAnalyzer
 from mobile_ingestion.arduino import ArduinoControllerPort, PySerialArduinoController
 from mobile_ingestion.config import AppConfig
+from mobile_ingestion.object_search import (ObjectSearchCoordinator,
+                                            ObjectSearchPort,
+                                            OpenAiObjectTargetResolver,
+                                            OpenAiVisionDetector,
+                                            SwitchableObjectDetector)
 from mobile_ingestion.runtime import AsyncioRunner
 from mobile_ingestion.session_manager import SessionManager
 from mobile_ingestion.voice import (NoOpWakeWordAction,
@@ -22,10 +27,12 @@ class ServiceContainer:
   session_manager: SessionManager
   arduino_controller: ArduinoControllerPort
   voice_processor: VoiceProcessingPort
+  object_search: ObjectSearchPort
 
   def shutdown(self) -> None:
     self.arduino_controller.shutdown()
     self.session_manager.shutdown()
+    self.object_search.shutdown()
     self.voice_processor.shutdown()
 
 
@@ -66,10 +73,28 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       transcript_buffer_size=settings.voice_transcript_buffer_size,
       audio_buffer_seconds=settings.voice_audio_buffer_seconds,
   )
+  object_search = ObjectSearchCoordinator(
+      voice_processor=voice_processor,
+      object_detector=SwitchableObjectDetector(
+          model=settings.object_search_vision_model,
+          detector_factory=lambda model: OpenAiVisionDetector(
+              api_key=os.getenv("OPENAI_API_KEY", ""),
+              model=model,
+          ),
+      ),
+      target_resolver=OpenAiObjectTargetResolver(
+          api_key=os.getenv("OPENAI_API_KEY", ""),
+          model=settings.object_search_resolver_model,
+      ),
+      wake_phrases=settings.voice_wake_phrases,
+      detection_interval_seconds=settings.object_search_detection_interval_seconds,
+      command_timeout_seconds=settings.object_search_command_timeout_seconds,
+  )
   session_manager = SessionManager(
       runtime=runtime,
       analyzer=analyzer,
       voice_processor=voice_processor,
+      object_search=object_search,
       settings=settings,
       session_factory=lambda context, callbacks: WebRtcPeerSession(
           context, callbacks),
@@ -81,4 +106,5 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       session_manager=session_manager,
       arduino_controller=arduino_controller,
       voice_processor=voice_processor,
+      object_search=object_search,
   )

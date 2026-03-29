@@ -12,11 +12,13 @@ from aiortc.mediastreams import MediaStreamError
 from mobile_ingestion.analyzer import (AudioFrameEnvelope, SessionMetadata,
                                        VideoFrameEnvelope)
 from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.object_search import ObjectSearchFrame
 from mobile_ingestion.session_manager import (PeerSessionPort, SessionCallbacks,
                                               SessionContext)
 from mobile_ingestion.voice import AudioChunk, PCM_SAMPLE_RATE
 
 VOICE_APPEND_WINDOW_MS = 200
+OBJECT_SEARCH_MAX_LONG_EDGE_PX = 1280
 
 
 class WebRtcPeerSession(PeerSessionPort):
@@ -119,6 +121,10 @@ class WebRtcPeerSession(PeerSessionPort):
             pts=frame.pts,
         )
         self._context.analyzer.on_video_frame(envelope)
+        search_frame = self._object_search_frame_from_video_frame(
+            frame, envelope.received_at)
+        if search_frame is not None:
+          self._context.object_search.submit_frame(search_frame)
     except (asyncio.CancelledError, MediaStreamError):
       return
 
@@ -179,6 +185,48 @@ class WebRtcPeerSession(PeerSessionPort):
         ))
     self._pending_voice_pcm.clear()
     self._pending_voice_received_at = None
+
+  def _object_search_frame_from_video_frame(
+      self,
+      frame: object,
+      received_at: datetime,
+  ) -> ObjectSearchFrame | None:
+    try:
+      width = int(frame.width)
+      height = int(frame.height)
+    except Exception:
+      return None
+
+    prepared_frame = frame
+    long_edge = max(width, height)
+    if long_edge > OBJECT_SEARCH_MAX_LONG_EDGE_PX:
+      scale = OBJECT_SEARCH_MAX_LONG_EDGE_PX / long_edge
+      target_width = max(1, int(round(width * scale)))
+      target_height = max(1, int(round(height * scale)))
+      if hasattr(frame, "reformat"):
+        try:
+          prepared_frame = frame.reformat(
+              width=target_width,
+              height=target_height,
+              format="rgb24",
+          )
+        except Exception:
+          prepared_frame = frame
+
+    try:
+      rgb_data = prepared_frame.to_ndarray(format="rgb24")
+      prepared_width = int(prepared_frame.width)
+      prepared_height = int(prepared_frame.height)
+    except Exception:
+      return None
+
+    return ObjectSearchFrame(
+        session_id=self._context.session_id,
+        received_at=received_at,
+        image_rgb=rgb_data,
+        width=prepared_width,
+        height=prepared_height,
+    )
 
   async def _wait_for_ice_completion(self) -> None:
     if self._peer_connection.iceGatheringState == "complete":

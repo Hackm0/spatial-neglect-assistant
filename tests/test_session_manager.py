@@ -11,6 +11,7 @@ from mobile_ingestion.analyzer import (AnalyzerMetrics, AnalyzerPort,
                                        VideoFrameEnvelope)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.object_search import ObjectSearchStatus
 from mobile_ingestion.runtime import AsyncioRunner
 from mobile_ingestion.session_manager import (SessionBusyError, SessionCallbacks,
                                               SessionContext, SessionManager)
@@ -101,6 +102,75 @@ class RecordingVoiceProcessor:
     )
 
 
+class RecordingObjectSearch:
+
+  def __init__(self) -> None:
+    self.started_sessions: list[str] = []
+    self.stopped_sessions: list[str] = []
+    self.status = ObjectSearchStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        state="idle",
+        target_label=None,
+        detected=False,
+        last_detected_at=None,
+        error=None,
+    )
+
+  def start_session(self, session_id: str) -> None:
+    self.started_sessions.append(session_id)
+    self.status = ObjectSearchStatus(
+        available=True,
+        active=True,
+        session_id=session_id,
+        state="idle",
+        target_label=None,
+        detected=False,
+        last_detected_at=None,
+        error=None,
+    )
+
+  def submit_frame(self, frame: object) -> None:
+    del frame
+
+  def stop_session(self, session_id: str) -> None:
+    self.stopped_sessions.append(session_id)
+    if self.status.session_id == session_id:
+      self.status = ObjectSearchStatus(
+          available=True,
+          active=False,
+          session_id=None,
+          state="idle",
+          target_label=None,
+          detected=False,
+          last_detected_at=None,
+          error=None,
+      )
+
+  def snapshot(self) -> ObjectSearchStatus:
+    return self.status
+
+  def subscribe(self) -> object:
+    raise NotImplementedError
+
+  def unsubscribe(self, subscription: object) -> None:
+    del subscription
+    raise NotImplementedError
+
+  def shutdown(self) -> None:
+    self.status = ObjectSearchStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        state="idle",
+        target_label=None,
+        detected=False,
+        last_detected_at=None,
+        error=None,
+    )
+
+
 @dataclass
 class FakePeerSession:
   context: SessionContext
@@ -157,25 +227,30 @@ def runtime() -> AsyncioRunner:
 
 
 @pytest.fixture
-def manager(runtime: AsyncioRunner) -> tuple[SessionManager, RecordingAnalyzer]:
+def manager(
+    runtime: AsyncioRunner
+) -> tuple[SessionManager, RecordingAnalyzer, RecordingVoiceProcessor,
+           RecordingObjectSearch]:
   analyzer = RecordingAnalyzer()
   voice_processor = RecordingVoiceProcessor()
+  object_search = RecordingObjectSearch()
   settings = AppConfig(testing=True)
   session_manager = SessionManager(
       runtime=runtime,
       analyzer=analyzer,
       voice_processor=voice_processor,
+      object_search=object_search,
       settings=settings,
       session_factory=lambda context, callbacks: FakePeerSession(
           context=context,
           callbacks=callbacks,
       ),
   )
-  return session_manager, analyzer, voice_processor
+  return session_manager, analyzer, voice_processor, object_search
 
 
 def test_session_manager_accepts_offer_and_updates_status(manager) -> None:
-  session_manager, analyzer, voice_processor = manager
+  session_manager, analyzer, voice_processor, object_search = manager
 
   answer = session_manager.accept_offer(
       SessionDescriptionDto(sdp="offer-sdp", type="offer"))
@@ -193,11 +268,14 @@ def test_session_manager_accepts_offer_and_updates_status(manager) -> None:
   assert analyzer.snapshot().audio_frames == 1
   assert len(voice_processor.started_sessions) == 1
   assert voice_processor.status.active is True
+  assert len(object_search.started_sessions) == 1
+  assert object_search.status.active is True
 
 
 def test_session_manager_rejects_second_session(runtime: AsyncioRunner) -> None:
   analyzer = RecordingAnalyzer()
   voice_processor = RecordingVoiceProcessor()
+  object_search = RecordingObjectSearch()
   settings = AppConfig(testing=True)
 
   @dataclass
@@ -210,6 +288,7 @@ def test_session_manager_rejects_second_session(runtime: AsyncioRunner) -> None:
       runtime=runtime,
       analyzer=analyzer,
       voice_processor=voice_processor,
+      object_search=object_search,
       settings=settings,
       session_factory=lambda context, callbacks: StickySession(context=context,
                                                               callbacks=callbacks),
@@ -222,7 +301,7 @@ def test_session_manager_rejects_second_session(runtime: AsyncioRunner) -> None:
 
 
 def test_session_manager_close_resets_state(manager) -> None:
-  session_manager, analyzer, voice_processor = manager
+  session_manager, analyzer, voice_processor, object_search = manager
   session_manager.accept_offer(SessionDescriptionDto(sdp="offer-sdp", type="offer"))
 
   session_manager.close_active_session()
@@ -232,6 +311,7 @@ def test_session_manager_close_resets_state(manager) -> None:
   assert status.active is False
   assert analyzer.snapshot().sessions_stopped == 1
   assert len(voice_processor.stopped_sessions) == 1
+  assert len(object_search.stopped_sessions) == 1
 
 
 def test_asyncio_runner_uses_background_thread(runtime: AsyncioRunner) -> None:

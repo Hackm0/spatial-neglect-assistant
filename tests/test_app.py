@@ -12,6 +12,9 @@ from mobile_ingestion.arduino import (ArduinoConflictError, ArduinoEvent,
                                       ArduinoSnapshot, ArduinoSubscription)
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto
+from mobile_ingestion.object_search import (ObjectSearchEvent,
+                                            ObjectSearchStatus,
+                                            ObjectSearchSubscription)
 from mobile_ingestion.services import ServiceContainer
 from mobile_ingestion.voice import (TranscriptEntry, VoiceEvent,
                                     VoiceStatus, VoiceSubscription,
@@ -266,6 +269,61 @@ class FakeVoiceProcessor:
     self.status = replace(self.status, active=False, session_id=None)
 
 
+class FakeObjectSearch:
+
+  def __init__(self) -> None:
+    detected_at = datetime.now(timezone.utc)
+    self.status = ObjectSearchStatus(
+        available=True,
+        active=False,
+        session_id=None,
+        state="searching",
+        target_label="clés",
+        detected=False,
+        last_detected_at=detected_at,
+        error=None,
+        model_ready=True,
+        model_state="ready",
+        model_detail="Modèle vision OpenAI actif : gpt-5.4-mini.",
+        selected_vision_model="gpt-5.4-mini",
+    )
+    self.events: "queue.Queue[ObjectSearchEvent | None]" = queue.Queue()
+    self.events.put(ObjectSearchEvent("status", self.status))
+    self.events.put(None)
+
+  def start_session(self, session_id: str) -> None:
+    self.status = replace(self.status, session_id=session_id, active=True)
+
+  def submit_frame(self, frame: object) -> None:
+    del frame
+
+  def stop_session(self, session_id: str) -> None:
+    if self.status.session_id == session_id:
+      self.status = replace(self.status, session_id=None, active=False)
+
+  def snapshot(self) -> ObjectSearchStatus:
+    return self.status
+
+  def set_selected_vision_model(self, model: str) -> ObjectSearchStatus:
+    if model not in {"gpt-5.4", "gpt-5.4-mini", "gpt-4o"}:
+      raise ValueError("Unsupported object-search vision model.")
+    self.status = replace(
+        self.status,
+        model_detail=f"Modèle vision OpenAI actif : {model}.",
+        selected_vision_model=model,
+    )
+    return self.status
+
+  def subscribe(self) -> ObjectSearchSubscription:
+    return ObjectSearchSubscription(1, self.events)
+
+  def unsubscribe(self, subscription: ObjectSearchSubscription) -> None:
+    del subscription
+
+  def shutdown(self) -> None:
+    self.status = replace(self.status, active=False, session_id=None)
+
+
 @pytest.fixture
 def client():
   settings = AppConfig(testing=True)
@@ -276,6 +334,7 @@ def client():
       session_manager=FakeSessionManager(),
       arduino_controller=FakeArduinoController(),
       voice_processor=FakeVoiceProcessor(),
+      object_search=FakeObjectSearch(),
   )
   app = create_app(settings, services=services)
   app.config.update(TESTING=True)
@@ -291,6 +350,9 @@ def test_index_renders(client) -> None:
   assert "Connexion mobile temps réel" in body
   assert "Debug Arduino" in body
   assert "Voice debug" in body
+  assert "Recherche d'objet" in body
+  assert "Modèle vision" in body
+  assert "objectSearchVisionModels" in body
   assert "videoMaxFps" in body
   assert "Dernière transcription" in body
 
@@ -353,6 +415,39 @@ def test_arduino_connect_route_returns_status_snapshot(client) -> None:
   payload = response.get_json()
   assert payload["connected"] is True
   assert payload["selectedPort"] == "/dev/ttyUSB0"
+
+
+def test_object_search_status_route_returns_json(client) -> None:
+  response = client.get("/api/object-search/status")
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["available"] is True
+  assert payload["state"] == "searching"
+  assert payload["targetLabel"] == "clés"
+  assert payload["detected"] is False
+  assert payload["modelReady"] is True
+  assert payload["modelState"] == "ready"
+  assert payload["modelDetail"] == "Modèle vision OpenAI actif : gpt-5.4-mini."
+  assert payload["selectedVisionModel"] == "gpt-5.4-mini"
+
+
+def test_object_search_vision_model_route_updates_status(client) -> None:
+  response = client.put("/api/object-search/vision-model",
+                        json={"model": "gpt-5.4"})
+
+  assert response.status_code == 200
+  payload = response.get_json()
+  assert payload["modelDetail"] == "Modèle vision OpenAI actif : gpt-5.4."
+  assert payload["selectedVisionModel"] == "gpt-5.4"
+
+
+def test_object_search_vision_model_route_rejects_invalid_models(client) -> None:
+  response = client.put("/api/object-search/vision-model",
+                        json={"model": "owlv2"})
+
+  assert response.status_code == 400
+  assert "Unsupported object-search vision model." in response.get_json()["error"]
 
 
 def test_arduino_ports_route_returns_serial_and_bluetooth_targets(client) -> None:
@@ -418,3 +513,13 @@ def test_voice_events_route_streams_sse(client) -> None:
   assert response.status_code == 200
   assert b"event: status" in body
   assert b"modeState" in body
+
+
+def test_object_search_events_route_streams_sse(client) -> None:
+  response = client.get("/api/object-search/events")
+  body = b"".join(response.response)
+
+  assert response.status_code == 200
+  assert b"event: status" in body
+  assert "targetLabel".encode("utf-8") in body
+  assert b"modelReady" in body

@@ -5,6 +5,8 @@ const NEUTRAL_SERVO_ANGLE = 90;
 const DEFAULT_MAX_VIDEO_FPS = 5;
 const VOICE_STATUS_POLL_INTERVAL_MS = 2000;
 const VOICE_EVENT_RECONNECT_DELAY_MS = 1500;
+const OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS = 2000;
+const OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS = 1500;
 
 const elements = {
   connectButton: document.getElementById("connect-button"),
@@ -26,6 +28,15 @@ const elements = {
   voiceLastWakeWord: document.getElementById("voice-last-wake-word"),
   voiceLastEntryId: document.getElementById("voice-last-entry-id"),
   voiceTranscriptLog: document.getElementById("voice-transcript-log"),
+  objectSearchBadge: document.getElementById("object-search-badge"),
+  objectSearchDetail: document.getElementById("object-search-detail"),
+  objectSearchTarget: document.getElementById("object-search-target"),
+  objectSearchModelDetail: document.getElementById("object-search-model-detail"),
+  objectSearchVisionModelSelect: document.getElementById(
+      "object-search-vision-model-select"),
+  objectSearchModelUpdateStatus: document.getElementById(
+      "object-search-model-update-status"),
+  objectSearchErrorMessage: document.getElementById("object-search-error-message"),
   debugToggleButton: document.getElementById("debug-toggle-button"),
   arduinoDebugPanel: document.getElementById("arduino-debug-panel"),
   arduinoDebugBadge: document.getElementById("arduino-debug-badge"),
@@ -77,6 +88,13 @@ const state = {
     lastTranscriptReceivedAt: null,
     lastWakeWord: null,
   },
+  objectSearch: {
+    eventSource: null,
+    statusInterval: null,
+    reconnectTimeout: null,
+    status: null,
+    modelUpdateInFlight: false,
+  },
   arduino: {
     debugVisible: false,
     eventSource: null,
@@ -123,6 +141,14 @@ function showVoiceError(message) {
 
 function clearVoiceError() {
   clearMessage(elements.voiceErrorMessage);
+}
+
+function showObjectSearchError(message) {
+  showMessage(elements.objectSearchErrorMessage, message);
+}
+
+function clearObjectSearchError() {
+  clearMessage(elements.objectSearchErrorMessage);
 }
 
 function showArduinoError(message) {
@@ -255,6 +281,306 @@ function updateVoiceDebugVisibility() {
 
 function shouldMaintainVoiceMonitoring() {
   return state.peerConnection !== null || state.localStream !== null;
+}
+
+function shouldMaintainObjectSearchMonitoring() {
+  return state.peerConnection !== null || state.localStream !== null;
+}
+
+function getConfiguredObjectSearchVisionModels() {
+  const configuredModels = window.APP_CONFIG?.objectSearchVisionModels;
+  if (!Array.isArray(configuredModels)) {
+    return [];
+  }
+  return configuredModels.filter((model) => typeof model === "string" && model);
+}
+
+function setObjectSearchModelSelectorEnabled(isEnabled) {
+  elements.objectSearchVisionModelSelect.disabled = !isEnabled;
+}
+
+function showObjectSearchModelUpdateStatus(message) {
+  showMessage(elements.objectSearchModelUpdateStatus, message);
+}
+
+function clearObjectSearchModelUpdateStatus() {
+  clearMessage(elements.objectSearchModelUpdateStatus);
+}
+
+function syncObjectSearchVisionModelSelector(status) {
+  const selectedModel = status?.selectedVisionModel
+    || window.APP_CONFIG?.objectSearchVisionModel
+    || "";
+  if (!selectedModel) {
+    return;
+  }
+  elements.objectSearchVisionModelSelect.value = selectedModel;
+}
+
+function renderObjectSearchVisionModelOptions() {
+  const models = getConfiguredObjectSearchVisionModels();
+  elements.objectSearchVisionModelSelect.innerHTML = "";
+
+  models.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    elements.objectSearchVisionModelSelect.append(option);
+  });
+
+  syncObjectSearchVisionModelSelector(state.objectSearch.status);
+  setObjectSearchModelSelectorEnabled(
+      models.length > 0 && !state.objectSearch.modelUpdateInFlight,
+  );
+}
+
+function setObjectSearchBadge(label, stateName) {
+  elements.objectSearchBadge.textContent = label;
+  elements.objectSearchBadge.dataset.state = stateName;
+}
+
+function buildObjectSearchDetail(status) {
+  if (!status) {
+    return "Connecte le flux mobile pour activer la recherche d'objet.";
+  }
+  if (!status.available) {
+    return status.error || "La recherche d'objet est indisponible sur le serveur.";
+  }
+  const hasPendingTarget = Boolean(status.targetLabel) && !status.detected;
+  const modelPreparing = status.active
+    && !status.modelReady
+    && (status.modelState === "loading" || status.modelState === "pending");
+  if (modelPreparing && !hasPendingTarget) {
+    return "Préparation du modèle vision...";
+  }
+  if (hasPendingTarget && !status.modelReady) {
+    return status.targetLabel
+      ? `Le modèle vision se prépare pour chercher « ${status.targetLabel} ».`
+      : "Le modèle vision se prépare pour la recherche d'objet.";
+  }
+  if (hasPendingTarget) {
+    return status.targetLabel
+      ? `Je cherche « ${status.targetLabel} » dans le champ de la caméra.`
+      : "Recherche d'objet en cours.";
+  }
+  if (status.state === "awaiting_request") {
+    return "Quelle cible dois-je chercher ?";
+  }
+  if (status.state === "resolving_target") {
+    return "Analyse de la demande vocale...";
+  }
+  if (status.state === "found") {
+    return status.targetLabel
+      ? `« ${status.targetLabel} » est visible dans le champ de la caméra.`
+      : "Objet détecté dans le champ de la caméra.";
+  }
+  if (status.state === "error") {
+    return status.error || "La recherche d'objet a rencontré une erreur.";
+  }
+  if (status.active) {
+    return "Dites « ok jarvis », puis demandez l'objet à trouver.";
+  }
+  return "Connecte le flux mobile pour activer la recherche d'objet.";
+}
+
+function buildObjectSearchModelDetail(status) {
+  if (!status) {
+    return "--";
+  }
+  if (typeof status.modelDetail === "string" && status.modelDetail) {
+    return status.modelDetail;
+  }
+  if (status.modelReady) {
+    return "Le modèle vision est prêt.";
+  }
+  if (status.modelState === "loading") {
+    return "Téléchargement / chargement du modèle vision en cours...";
+  }
+  if (status.modelState === "unavailable") {
+    return "Le modèle vision est indisponible.";
+  }
+  if (status.modelState === "error") {
+    return "Le modèle vision a rencontré une erreur.";
+  }
+  return "Le modèle vision n'est pas encore chargé.";
+}
+
+function applyObjectSearchStatus(status) {
+  state.objectSearch.status = status;
+  if (typeof status.selectedVisionModel === "string" && status.selectedVisionModel) {
+    window.APP_CONFIG.objectSearchVisionModel = status.selectedVisionModel;
+  }
+  elements.objectSearchTarget.textContent = status.targetLabel || "--";
+  elements.objectSearchDetail.textContent = buildObjectSearchDetail(status);
+  elements.objectSearchModelDetail.textContent = buildObjectSearchModelDetail(status);
+  syncObjectSearchVisionModelSelector(status);
+  setObjectSearchModelSelectorEnabled(!state.objectSearch.modelUpdateInFlight);
+  const hasPendingTarget = Boolean(status.targetLabel) && !status.detected;
+
+  let badgeLabel = "Inactif";
+  let badgeState = status.state || "idle";
+  if (!status.available) {
+    badgeLabel = "Indisponible";
+    badgeState = "unavailable";
+  } else if (status.detected || status.state === "found") {
+    badgeLabel = "Détecté";
+    badgeState = "found";
+  } else if (status.active && !status.modelReady
+      && (status.modelState === "loading" || status.modelState === "pending")) {
+    badgeLabel = "Chargement";
+    badgeState = "loading";
+  } else if (hasPendingTarget) {
+    badgeLabel = "Recherche";
+    badgeState = "searching";
+  } else if (status.state === "awaiting_request") {
+    badgeLabel = "À l'écoute";
+  } else if (status.state === "resolving_target") {
+    badgeLabel = "Analyse";
+  } else if (status.state === "error") {
+    badgeLabel = "Erreur";
+  } else if (status.active && status.modelReady) {
+    badgeLabel = "Prêt";
+    badgeState = "ready";
+  }
+  setObjectSearchBadge(badgeLabel, badgeState);
+
+  if (status.error && (status.state === "error" || !status.available)) {
+    showObjectSearchError(status.error);
+  } else {
+    clearObjectSearchError();
+  }
+}
+
+async function fetchObjectSearchStatus() {
+  const payload = await requestJson("/api/object-search/status");
+  applyObjectSearchStatus(payload);
+}
+
+async function updateObjectSearchVisionModel(model) {
+  const fallbackModel = state.objectSearch.status?.selectedVisionModel
+    || window.APP_CONFIG?.objectSearchVisionModel
+    || "";
+  state.objectSearch.modelUpdateInFlight = true;
+  showObjectSearchModelUpdateStatus(`Application du modèle ${model}...`);
+  setObjectSearchModelSelectorEnabled(false);
+  clearObjectSearchError();
+
+  try {
+    const payload = await requestJson("/api/object-search/vision-model", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ model }),
+    });
+    state.objectSearch.modelUpdateInFlight = false;
+    window.APP_CONFIG.objectSearchVisionModel = payload.selectedVisionModel || model;
+    clearObjectSearchModelUpdateStatus();
+    applyObjectSearchStatus(payload);
+  } catch (error) {
+    state.objectSearch.modelUpdateInFlight = false;
+    elements.objectSearchVisionModelSelect.value = fallbackModel;
+    showObjectSearchError(
+        error.message || "Impossible de changer le modèle vision.",
+    );
+    showObjectSearchModelUpdateStatus(
+        "Le changement de modèle a échoué.",
+    );
+    setObjectSearchModelSelectorEnabled(true);
+    throw error;
+  }
+}
+
+function clearObjectSearchReconnectTimer() {
+  if (state.objectSearch.reconnectTimeout !== null) {
+    window.clearTimeout(state.objectSearch.reconnectTimeout);
+    state.objectSearch.reconnectTimeout = null;
+  }
+}
+
+function scheduleObjectSearchEventStreamReconnect() {
+  if (state.objectSearch.reconnectTimeout !== null
+      || !shouldMaintainObjectSearchMonitoring()) {
+    return;
+  }
+
+  state.objectSearch.reconnectTimeout = window.setTimeout(() => {
+    state.objectSearch.reconnectTimeout = null;
+    if (!shouldMaintainObjectSearchMonitoring()) {
+      return;
+    }
+    openObjectSearchEventStream();
+  }, OBJECT_SEARCH_EVENT_RECONNECT_DELAY_MS);
+}
+
+function closeObjectSearchEventStream() {
+  if (state.objectSearch.eventSource) {
+    state.objectSearch.eventSource.close();
+    state.objectSearch.eventSource = null;
+  }
+}
+
+function openObjectSearchEventStream() {
+  if (!shouldMaintainObjectSearchMonitoring()) {
+    return;
+  }
+
+  closeObjectSearchEventStream();
+  const eventSource = new EventSource("/api/object-search/events");
+  state.objectSearch.eventSource = eventSource;
+
+  eventSource.addEventListener("status", (event) => {
+    const payload = JSON.parse(event.data);
+    applyObjectSearchStatus(payload);
+    clearObjectSearchReconnectTimer();
+  });
+
+  eventSource.addEventListener("error", () => {
+    if (state.objectSearch.eventSource !== eventSource) {
+      return;
+    }
+    closeObjectSearchEventStream();
+    scheduleObjectSearchEventStreamReconnect();
+    fetchObjectSearchStatus().catch((error) => {
+      console.error(error);
+    });
+  });
+}
+
+function startObjectSearchStatusPolling() {
+  stopObjectSearchStatusPolling();
+  state.objectSearch.statusInterval = window.setInterval(() => {
+    fetchObjectSearchStatus().catch((error) => {
+      console.error(error);
+      showObjectSearchError(
+          "Impossible de récupérer le statut de recherche d'objet.",
+      );
+    });
+  }, OBJECT_SEARCH_STATUS_POLL_INTERVAL_MS);
+}
+
+function stopObjectSearchStatusPolling() {
+  if (state.objectSearch.statusInterval !== null) {
+    window.clearInterval(state.objectSearch.statusInterval);
+    state.objectSearch.statusInterval = null;
+  }
+}
+
+function resetObjectSearchState() {
+  clearObjectSearchReconnectTimer();
+  state.objectSearch.status = null;
+  state.objectSearch.modelUpdateInFlight = false;
+  elements.objectSearchTarget.textContent = "--";
+  elements.objectSearchModelDetail.textContent = "--";
+  elements.objectSearchDetail.textContent =
+    "Connecte le flux mobile pour activer la recherche d'objet.";
+  setObjectSearchBadge("Inactif", "idle");
+  syncObjectSearchVisionModelSelector(null);
+  clearObjectSearchModelUpdateStatus();
+  setObjectSearchModelSelectorEnabled(
+      getConfiguredObjectSearchVisionModels().length > 0,
+  );
+  clearObjectSearchError();
 }
 
 function renderVoiceTransportDetail() {
@@ -825,8 +1151,11 @@ async function connect() {
     await state.peerConnection.setRemoteDescription(payload);
     setStatus("Streaming", "Le flux mobile est connecte au serveur.");
     await fetchVoiceStatus();
+    await fetchObjectSearchStatus();
     startVoiceStatusPolling();
+    startObjectSearchStatusPolling();
     openVoiceEventStream();
+    openObjectSearchEventStream();
     startStatusPolling();
   } catch (error) {
     console.error(error);
@@ -841,7 +1170,9 @@ async function disconnect(options = {}) {
 
   stopStatusPolling();
   stopVoiceStatusPolling();
+  stopObjectSearchStatusPolling();
   clearVoiceReconnectTimer();
+  clearObjectSearchReconnectTimer();
 
   if (state.peerConnection) {
     state.peerConnection.getSenders().forEach((sender) => sender.track?.stop());
@@ -871,6 +1202,8 @@ async function disconnect(options = {}) {
 
   closeVoiceEventStream();
   resetVoiceState();
+  closeObjectSearchEventStream();
+  resetObjectSearchState();
 }
 
 async function fetchArduinoStatus() {
@@ -1060,6 +1393,12 @@ elements.disconnectButton.addEventListener("click", () => {
   });
 });
 
+elements.objectSearchVisionModelSelect.addEventListener("change", (event) => {
+  updateObjectSearchVisionModel(event.target.value).catch((error) => {
+    console.error(error);
+  });
+});
+
 elements.voiceDebugToggleButton.addEventListener("click", () => {
   ensureVoiceAudioContext();
   toggleVoiceDebugPanel();
@@ -1146,8 +1485,11 @@ elements.arduinoAllStopButton.addEventListener("click", () => {
 window.addEventListener("beforeunload", () => {
   stopStatusPolling();
   stopVoiceStatusPolling();
+  stopObjectSearchStatusPolling();
   clearVoiceReconnectTimer();
+  clearObjectSearchReconnectTimer();
   closeVoiceEventStream();
+  closeObjectSearchEventStream();
   closeArduinoEventStream();
   if (state.peerConnection) {
     state.peerConnection.close();
@@ -1158,7 +1500,9 @@ window.addEventListener("beforeunload", () => {
 });
 
 updateVoiceDebugVisibility();
+renderObjectSearchVisionModelOptions();
 resetVoiceState();
+resetObjectSearchState();
 updateArduinoDebugVisibility();
 setArduinoManualControlsEnabled(false);
 applyArduinoTelemetry(null);
@@ -1171,4 +1515,9 @@ fetchStatus().catch(() => {
 fetchVoiceStatus().catch(() => {
   elements.voiceAvailabilityDetail.textContent =
     "Le statut voix initial n'a pas pu etre lu.";
+});
+
+fetchObjectSearchStatus().catch(() => {
+  elements.objectSearchDetail.textContent =
+    "Le statut initial de recherche d'objet n'a pas pu etre lu.";
 });

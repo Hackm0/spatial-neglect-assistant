@@ -24,6 +24,37 @@
 
         <video id="local-preview" class="preview" autoplay playsinline muted></video>
 
+        <section class="object-search-panel" aria-live="polite">
+          <div class="status-row compact">
+            <span class="status-label">Recherche d'objet</span>
+            <span id="object-search-badge" class="status-badge subtle" data-state="idle">
+              Inactif
+            </span>
+          </div>
+          <p id="object-search-detail" class="status-detail compact">
+            Connecte le flux mobile pour activer la recherche d'objet.
+          </p>
+          <p class="object-search-target-row">
+            Cible courante:
+            <strong id="object-search-target">--</strong>
+          </p>
+          <p class="object-search-target-row">
+            Modèle vision:
+            <strong id="object-search-model-detail">--</strong>
+          </p>
+          <div class="inline-controls object-search-model-controls">
+            <label class="object-search-model-label" for="object-search-vision-model-select">
+              Sélection du modèle
+            </label>
+            <select
+              id="object-search-vision-model-select"
+              class="debug-select object-search-model-select"
+            ></select>
+          </div>
+          <p id="object-search-model-update-status" class="status-detail compact" hidden></p>
+          <p id="object-search-error-message" class="error-message" hidden></p>
+        </section>
+
         <div class="button-row">
           <button id="connect-button" type="button">Connecter</button>
           <button id="disconnect-button" type="button" class="secondary" disabled>
@@ -260,8 +291,10 @@
       window.APP_CONFIG = {
         iceServers: {{ ice_servers | tojson }},
         videoMaxFps: {{ video_max_fps | tojson }},
+        objectSearchVisionModels: {{ object_search_vision_models | tojson }},
+        objectSearchVisionModel: {{ object_search_vision_model | tojson }},
       };
     </script>
-    <script src="{{ url_for('static', filename='app.js', v='20260329-voice-fallback1') }}" defer></script>
+    <script src="{{ url_for('static', filename='app.js', v='20260329-object-search4') }}" defer></script>
   </body>
 </html>

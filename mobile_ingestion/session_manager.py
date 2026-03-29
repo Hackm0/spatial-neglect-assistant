@@ -9,6 +9,7 @@ from uuid import uuid4
 from mobile_ingestion.analyzer import AnalyzerPort
 from mobile_ingestion.config import AppConfig
 from mobile_ingestion.dto import SessionDescriptionDto, SessionStatusDto
+from mobile_ingestion.object_search import ObjectSearchPort
 from mobile_ingestion.runtime import AsyncioRunner
 from mobile_ingestion.voice import VoiceProcessingPort
 
@@ -27,6 +28,7 @@ class SessionContext:
   started_at: datetime
   analyzer: AnalyzerPort
   voice_processor: VoiceProcessingPort
+  object_search: ObjectSearchPort
   settings: AppConfig
 
 
@@ -55,11 +57,13 @@ PeerSessionFactory = Callable[[SessionContext, SessionCallbacks], PeerSessionPor
 class SessionManager:
 
   def __init__(self, *, runtime: AsyncioRunner, analyzer: AnalyzerPort,
-               voice_processor: VoiceProcessingPort, settings: AppConfig,
+               voice_processor: VoiceProcessingPort,
+               object_search: ObjectSearchPort, settings: AppConfig,
                session_factory: PeerSessionFactory) -> None:
     self._runtime = runtime
     self._analyzer = analyzer
     self._voice_processor = voice_processor
+    self._object_search = object_search
     self._settings = settings
     self._session_factory = session_factory
     self._lock = Lock()
@@ -121,6 +125,7 @@ class SessionManager:
           started_at=datetime.now(timezone.utc),
           analyzer=self._analyzer,
           voice_processor=self._voice_processor,
+          object_search=self._object_search,
           settings=self._settings,
       )
       callbacks = SessionCallbacks(
@@ -141,7 +146,10 @@ class SessionManager:
       self._error = None
     try:
       self._voice_processor.start_session(context.session_id)
+      self._object_search.start_session(context.session_id)
     except Exception:
+      self._object_search.stop_session(context.session_id)
+      self._voice_processor.stop_session(context.session_id)
       self._set_idle_state()
       raise
     return session
@@ -194,6 +202,7 @@ class SessionManager:
       if not had_error:
         self._state = "idle"
     if session_id is not None:
+      self._object_search.stop_session(session_id)
       self._voice_processor.stop_session(session_id)
 
   def _set_idle_state(self) -> None:
@@ -209,4 +218,5 @@ class SessionManager:
       self._started_at = None
       self._error = None
     if session_id is not None:
+      self._object_search.stop_session(session_id)
       self._voice_processor.stop_session(session_id)

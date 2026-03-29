@@ -6,6 +6,23 @@ from pathlib import Path
 from typing import Any, Mapping
 
 
+OBJECT_SEARCH_VISION_MODELS = (
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-4o",
+)
+
+
+def normalize_object_search_vision_model(model: Any) -> str:
+  normalized = str(model).strip()
+  if normalized not in OBJECT_SEARCH_VISION_MODELS:
+    supported = ", ".join(OBJECT_SEARCH_VISION_MODELS)
+    raise ValueError(
+        "Unsupported object-search vision model. "
+        f"Expected one of: {supported}.")
+  return normalized
+
+
 def _parse_bool(raw_value: str | bool | None, default: bool) -> bool:
   if raw_value is None:
     return default
@@ -101,6 +118,15 @@ class AppConfig:
   voice_audio_buffer_seconds: float = 20.0
   voice_wake_phrases: tuple[str, ...] = ("okay jarvis", "ok jarvis")
   voice_wake_cooldown_seconds: float = 3.0
+  object_search_vision_model: str = "gpt-5.4-mini"
+  object_search_detection_interval_seconds: float = 1.0
+  object_search_command_timeout_seconds: float = 8.0
+  object_search_resolver_model: str = "gpt-4o-mini"
+
+  def __post_init__(self) -> None:
+    normalized_model = normalize_object_search_vision_model(
+        self.object_search_vision_model)
+    object.__setattr__(self, "object_search_vision_model", normalized_model)
 
   @classmethod
   def from_mapping(cls,
@@ -147,6 +173,20 @@ class AppConfig:
         "voice_wake_cooldown_seconds": float(
             os.getenv("MOBILE_INGEST_VOICE_WAKE_COOLDOWN_SECONDS",
                       defaults.voice_wake_cooldown_seconds)),
+        "object_search_vision_model": os.getenv(
+            "MOBILE_INGEST_OBJECT_SEARCH_VISION_MODEL",
+            defaults.object_search_vision_model,
+        ),
+        "object_search_detection_interval_seconds": float(
+            os.getenv("MOBILE_INGEST_OBJECT_SEARCH_DETECTION_INTERVAL_SECONDS",
+                      defaults.object_search_detection_interval_seconds)),
+        "object_search_command_timeout_seconds": float(
+            os.getenv("MOBILE_INGEST_OBJECT_SEARCH_COMMAND_TIMEOUT_SECONDS",
+                      defaults.object_search_command_timeout_seconds)),
+        "object_search_resolver_model": os.getenv(
+            "MOBILE_INGEST_OBJECT_SEARCH_RESOLVER_MODEL",
+            defaults.object_search_resolver_model,
+        ),
     }
     if overrides:
       for key, value in overrides.items():
@@ -173,6 +213,8 @@ class AppConfig:
             "session_shutdown_timeout_seconds",
             "voice_audio_buffer_seconds",
             "voice_wake_cooldown_seconds",
+            "object_search_detection_interval_seconds",
+            "object_search_command_timeout_seconds",
         }:
           values[normalized_key] = float(value)
         elif normalized_key in values:
