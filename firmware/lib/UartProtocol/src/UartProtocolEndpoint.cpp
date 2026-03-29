@@ -70,6 +70,11 @@ bool UartProtocolEndpoint::sendTelemetrySnapshot(const SensorSnapshot& snapshot)
   return true;
 }
 
+void UartProtocolEndpoint::resetReception() {
+  resetParser();
+  hasPendingCommand_ = false;
+}
+
 uint32_t UartProtocolEndpoint::invalidFrameCount() const {
   return invalidFrameCount_;
 }

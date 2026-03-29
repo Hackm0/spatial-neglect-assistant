@@ -1,7 +1,10 @@
 # UART Protocol
 
 ## Overview
-- Link settings: `115200 8N1`
+- Link settings: `9600 8N1`
+- On Arduino Uno, the HC-05 is connected directly to the hardware UART on pins `D0`/`D1`.
+- Because the HC-05 shares the hardware UART with USB, disconnect the HC-05 from `D0`/`D1` while uploading new firmware.
+- Use one control link for both commands and telemetry.
 - Little-endian
 
 All sensor output is published as binary telemetry frames.
@@ -41,8 +44,8 @@ Payload length: `3`
 
 Behavior:
 - The device clamps the servo angle to the configured servo limits before applying it.
-- The host should resend this frame at least every `50 ms`.
-- If no valid command arrives for `250 ms`, the device enters fail-safe: servo target returns to its configured neutral angle and vibration turns off.
+- The host should resend this frame at least every `200 ms`.
+- If no valid command arrives for `10000 ms`, the device enters fail-safe: servo target returns to its configured neutral angle and vibration turns off.
 
 ### `0x81` TelemetrySnapshot
 
