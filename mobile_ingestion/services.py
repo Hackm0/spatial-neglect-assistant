@@ -120,6 +120,8 @@ def build_services(settings: AppConfig) -> ServiceContainer:
       idle_check_interval_seconds=settings.mode_idle_check_interval_seconds,
       eating_check_interval_seconds=settings.mode_eating_check_interval_seconds,
       eating_streak_required=settings.mode_eating_streak_required,
+      writing_check_interval_seconds=settings.mode_writing_check_interval_seconds,
+      writing_streak_required=settings.mode_writing_streak_required,
       eating_vibration_seconds=settings.mode_eating_vibration_seconds,
       eating_vibration_cooldown_seconds=(
           settings.mode_eating_vibration_cooldown_seconds),

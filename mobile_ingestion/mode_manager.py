@@ -34,6 +34,10 @@ class RuntimeModeStatus:
   is_eating: bool | None = None
   one_side_food_remaining: bool | None = None
   remaining_side: str | None = None
+  paper_visible: bool | None = None
+  is_writing: bool | None = None
+  one_side_writing: bool | None = None
+  writing_side: str | None = None
   last_updated_at: datetime | None = None
 
 
@@ -85,6 +89,8 @@ class RuntimeModeManager(RuntimeModePort):
       idle_check_interval_seconds: float,
       eating_check_interval_seconds: float,
       eating_streak_required: int,
+      writing_check_interval_seconds: float,
+      writing_streak_required: int,
       eating_vibration_seconds: float,
       eating_vibration_cooldown_seconds: float,
       object_search_completion_seconds: float,
@@ -96,6 +102,8 @@ class RuntimeModeManager(RuntimeModePort):
     self._idle_check_interval_seconds = max(1.0, idle_check_interval_seconds)
     self._eating_check_interval_seconds = max(1.0, eating_check_interval_seconds)
     self._eating_streak_required = max(1, eating_streak_required)
+    self._writing_check_interval_seconds = max(1.0, writing_check_interval_seconds)
+    self._writing_streak_required = max(1, writing_streak_required)
     self._eating_vibration_seconds = max(0.1, eating_vibration_seconds)
     self._eating_vibration_cooldown_seconds = max(
         self._eating_vibration_seconds,
@@ -128,8 +136,11 @@ class RuntimeModeManager(RuntimeModePort):
     self._latest_frame: ObjectSearchFrame | None = None
     self._next_idle_check_at = 0.0
     self._next_eating_check_at = 0.0
+    self._next_writing_check_at = 0.0
     self._idle_plate_streak = 0
+    self._idle_paper_streak = 0
     self._eating_streak = 0
+    self._writing_streak = 0
     self._eating_vibration_until: float | None = None
     self._eating_notice_until: float | None = None
     self._next_eating_vibration_allowed_at = 0.0
@@ -176,8 +187,11 @@ class RuntimeModeManager(RuntimeModePort):
       self._latest_frame = None
       self._next_idle_check_at = now + self._idle_check_interval_seconds
       self._next_eating_check_at = now + self._eating_check_interval_seconds
+      self._next_writing_check_at = now + self._writing_check_interval_seconds
       self._idle_plate_streak = 0
+      self._idle_paper_streak = 0
       self._eating_streak = 0
+      self._writing_streak = 0
       self._eating_vibration_until = None
       self._eating_notice_until = None
       self._next_eating_vibration_allowed_at = now
@@ -224,7 +238,9 @@ class RuntimeModeManager(RuntimeModePort):
       self._stop_event = None
       self._latest_frame = None
       self._idle_plate_streak = 0
+      self._idle_paper_streak = 0
       self._eating_streak = 0
+      self._writing_streak = 0
       self._eating_vibration_until = None
       self._eating_notice_until = None
       self._object_search_completion_deadline = None
@@ -377,6 +393,8 @@ class RuntimeModeManager(RuntimeModePort):
       self._apply_idle_check(session_id, now)
     elif mode == "eating":
       self._apply_eating_check(session_id, now)
+    elif mode == "writing":
+      self._apply_writing_check(session_id, now)
 
     self._apply_eating_vibration_timeout(session_id, now)
     self._apply_eating_notice_timeout(session_id, now)
@@ -399,6 +417,7 @@ class RuntimeModeManager(RuntimeModePort):
       return
 
     enter_eating = False
+    enter_writing = False
     with self._lock:
       if self._active_session_id != session_id:
         return
@@ -406,6 +425,10 @@ class RuntimeModeManager(RuntimeModePort):
         self._idle_plate_streak += 1
       else:
         self._idle_plate_streak = 0
+      if result.paper_visible:
+        self._idle_paper_streak += 1
+      else:
+        self._idle_paper_streak = 0
       # Allow entry when eating is explicit OR plate is stably visible OR
       # side imbalance is already clear; this reduces missed transitions.
       enter_eating = (
@@ -415,6 +438,17 @@ class RuntimeModeManager(RuntimeModePort):
               or result.one_side_food_remaining
               or self._idle_plate_streak >= 2
           ))
+      # Writing mode enters as soon as paper is visible.
+      enter_writing = result.paper_visible and self._idle_paper_streak >= 1
+
+    if enter_writing:
+      self._set_mode(
+          session_id,
+          mode="writing",
+          detail="Mode ecriture actif.",
+          detection_result=result,
+      )
+      return
 
     if enter_eating:
       self._set_mode(
@@ -423,6 +457,15 @@ class RuntimeModeManager(RuntimeModePort):
           detail="Mode repas active.",
           detection_result=result,
       )
+      return
+
+    # Keep idle detail consistent when no transition is triggered.
+    self._set_mode(
+        session_id,
+        mode="idle",
+        detail="Mode idle.",
+        detection_result=result,
+    )
 
   def _apply_eating_check(self, session_id: str, now: float) -> None:
     frame = None
@@ -486,6 +529,69 @@ class RuntimeModeManager(RuntimeModePort):
     if should_vibrate:
       self._set_backend_vibration(True)
 
+  def _apply_writing_check(self, session_id: str, now: float) -> None:
+    frame = None
+    should_run = False
+    with self._lock:
+      if self._active_session_id != session_id:
+        return
+      if now >= self._next_writing_check_at:
+        should_run = True
+        self._next_writing_check_at = now + self._writing_check_interval_seconds
+        frame = self._latest_frame
+    if not should_run or frame is None:
+      return
+
+    result = self._run_eating_detection(session_id, frame)
+    if result is None:
+      return
+
+    if not result.paper_visible:
+      with self._lock:
+        self._writing_streak = 0
+      self._set_mode(
+          session_id,
+          mode="idle",
+          detail="Feuille non detectee, retour en mode idle.",
+          detection_result=result,
+      )
+      self._set_backend_vibration(False)
+      return
+
+    should_vibrate = False
+    detail = "Mode ecriture actif."
+    with self._lock:
+      if self._active_session_id != session_id:
+        return
+      # Be sensitive in writing mode: right-side writing is enough to count.
+      if result.is_writing and result.writing_side == "right":
+        self._writing_streak += 1
+      else:
+        self._writing_streak = 0
+
+      if (self._writing_streak >= self._writing_streak_required
+          and now >= self._next_eating_vibration_allowed_at):
+        self._eating_vibration_until = now + self._eating_vibration_seconds
+        self._eating_notice_until = now + min(3.0, self._eating_vibration_seconds)
+        self._next_eating_vibration_allowed_at = (
+            now + self._eating_vibration_cooldown_seconds)
+        should_vibrate = True
+
+      if should_vibrate:
+        detail = self._writing_notice_text(result.writing_side)
+      elif self._eating_notice_until is not None and now < self._eating_notice_until:
+        detail = self._status.detail or "Mode ecriture actif."
+
+    self._set_mode(
+        session_id,
+        mode="writing",
+        detail=detail,
+        detection_result=result,
+    )
+
+    if should_vibrate:
+      self._set_backend_vibration(True)
+
   def _apply_object_search_timeout(self, session_id: str, now: float) -> None:
     should_complete = False
     with self._lock:
@@ -525,18 +631,30 @@ class RuntimeModeManager(RuntimeModePort):
       if self._active_session_id != session_id:
         return
       if self._status.mode != "eating":
-        self._eating_notice_until = None
-        return
+        if self._status.mode != "writing":
+          self._eating_notice_until = None
+          return
       if self._eating_notice_until is not None and now >= self._eating_notice_until:
         self._eating_notice_until = None
         should_clear_notice = True
 
     if should_clear_notice:
-      self._set_mode(
-          session_id,
-          mode="eating",
-          detail="Mode repas actif.",
-      )
+      with self._lock:
+        if self._active_session_id != session_id:
+          return
+        mode = self._status.mode
+      if mode == "eating":
+        self._set_mode(
+            session_id,
+            mode="eating",
+            detail="Mode repas actif.",
+        )
+      elif mode == "writing":
+        self._set_mode(
+            session_id,
+            mode="writing",
+            detail="Mode ecriture actif.",
+        )
 
   def _run_eating_detection(
       self,
@@ -579,7 +697,9 @@ class RuntimeModeManager(RuntimeModePort):
         return
       if mode == "object_search":
         self._idle_plate_streak = 0
+        self._idle_paper_streak = 0
         self._eating_streak = 0
+        self._writing_streak = 0
         self._eating_vibration_until = None
         self._eating_notice_until = None
 
@@ -600,6 +720,15 @@ class RuntimeModeManager(RuntimeModePort):
               if detection_result is not None else self._status.one_side_food_remaining),
           remaining_side=(detection_result.remaining_side
                           if detection_result is not None else self._status.remaining_side),
+            paper_visible=(detection_result.paper_visible
+                   if detection_result is not None else self._status.paper_visible),
+            is_writing=(detection_result.is_writing
+                  if detection_result is not None else self._status.is_writing),
+            one_side_writing=(
+              detection_result.one_side_writing
+              if detection_result is not None else self._status.one_side_writing),
+            writing_side=(detection_result.writing_side
+                  if detection_result is not None else self._status.writing_side),
           last_updated_at=_utcnow(),
       )
       if updated != self._status:
@@ -632,3 +761,10 @@ class RuntimeModeManager(RuntimeModePort):
     if remaining_side == "right":
       return "Repas detecte: cote gauche vide, cote droit encore plein."
     return "Repas detecte: nourriture restante surtout d'un seul cote."
+
+  def _writing_notice_text(self, writing_side: str | None) -> str:
+    if writing_side == "right":
+      return "Ecriture detectee surtout a droite. Pense a couvrir aussi la gauche."
+    if writing_side == "left":
+      return "Ecriture detectee surtout a gauche."
+    return "Ecriture detectee surtout d'un seul cote de la feuille."

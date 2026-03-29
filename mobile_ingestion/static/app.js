@@ -21,6 +21,8 @@ const elements = {
   connectButton: document.getElementById("connect-button"),
   disconnectButton: document.getElementById("disconnect-button"),
   roleSelect: document.getElementById("role-select"),
+  cameraSelect: document.getElementById("camera-select"),
+  refreshCamerasButton: document.getElementById("refresh-cameras-button"),
   errorMessage: document.getElementById("error-message"),
   preview: document.getElementById("local-preview"),
   objectSearchUnusedZone: document.getElementById("object-search-unused-zone"),
@@ -100,6 +102,11 @@ const state = {
   connectedRole: null,
   sessionToken: null,
   statusInterval: null,
+  camera: {
+    availableDevices: [],
+    selectedDeviceId: "",
+    switching: false,
+  },
   voice: {
     debugVisible: false,
     eventSource: null,
@@ -229,10 +236,34 @@ function setBusy(isBusy) {
   elements.connectButton.disabled = isBusy;
   elements.disconnectButton.disabled = !isBusy;
   elements.roleSelect.disabled = isBusy;
+  updateCameraControls();
 }
 
 function selectedRole() {
   return elements.roleSelect.value || SESSION_ROLE_SENDER;
+}
+
+function selectedCameraDeviceId() {
+  return elements.cameraSelect?.value || "";
+}
+
+function shouldEnableCameraControls() {
+  const activeRole = state.connectedRole || state.requestedRole || selectedRole();
+  const senderActive = activeRole === SESSION_ROLE_SENDER;
+  if (!senderActive) {
+    return false;
+  }
+  return !state.camera.switching;
+}
+
+function updateCameraControls() {
+  const disabled = !shouldEnableCameraControls();
+  if (elements.cameraSelect) {
+    elements.cameraSelect.disabled = disabled;
+  }
+  if (elements.refreshCamerasButton) {
+    elements.refreshCamerasButton.disabled = disabled;
+  }
 }
 
 function hasSenderPrivileges() {
@@ -302,10 +333,15 @@ function getConfiguredVideoMaxFps() {
   return configuredValue;
 }
 
-function buildVideoConstraints() {
+function buildVideoConstraints(deviceId = "") {
   const maxFps = getConfiguredVideoMaxFps();
+  const preferredDeviceId = String(deviceId || "").trim();
+  const cameraSelector = preferredDeviceId
+    ? { deviceId: { exact: preferredDeviceId } }
+    : { facingMode: { ideal: "environment" } };
+
   return {
-    facingMode: { ideal: "environment" },
+    ...cameraSelector,
     width: { ideal: 1280 },
     height: { ideal: 720 },
     frameRate: {
@@ -327,6 +363,124 @@ async function enforceVideoTrackConstraints(stream) {
     });
   } catch (error) {
     console.warn("Impossible de limiter la cadence video.", error);
+  }
+}
+
+function getPreferredCameraDeviceId(videoDevices) {
+  if (!Array.isArray(videoDevices) || videoDevices.length === 0) {
+    return "";
+  }
+  const labelledDevices = videoDevices.map((device) => {
+    const normalizedLabel = String(device.label || "").toLowerCase();
+    return {
+      device,
+      normalizedLabel,
+    };
+  });
+  const preferredPatterns = [
+    "ultra",
+    "wide",
+    "grand angle",
+    "rear",
+    "back",
+    "environment",
+    "arriere",
+  ];
+  const preferredEntry = labelledDevices.find((entry) => preferredPatterns.some(
+      (pattern) => entry.normalizedLabel.includes(pattern),
+  ));
+  if (preferredEntry) {
+    return preferredEntry.device.deviceId;
+  }
+  return videoDevices[0].deviceId;
+}
+
+function renderCameraOptions(videoDevices) {
+  if (!elements.cameraSelect) {
+    return;
+  }
+
+  const currentSelection = selectedCameraDeviceId();
+  const knownSelection = state.camera.selectedDeviceId;
+  elements.cameraSelect.innerHTML = "";
+
+  const defaultOption = document.createElement("option");
+  defaultOption.value = "";
+  defaultOption.textContent = "Caméra par défaut (arrière si possible)";
+  elements.cameraSelect.append(defaultOption);
+
+  videoDevices.forEach((device, index) => {
+    const option = document.createElement("option");
+    option.value = device.deviceId;
+    option.textContent = device.label || `Caméra ${index + 1}`;
+    elements.cameraSelect.append(option);
+  });
+
+  const preferredSelection = currentSelection
+    || knownSelection
+    || getPreferredCameraDeviceId(videoDevices)
+    || "";
+  elements.cameraSelect.value = preferredSelection;
+  state.camera.selectedDeviceId = elements.cameraSelect.value || "";
+}
+
+async function refreshCameraDevices() {
+  if (!navigator.mediaDevices?.enumerateDevices) {
+    return;
+  }
+
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const videoDevices = devices.filter((device) => device.kind === "videoinput");
+  state.camera.availableDevices = videoDevices;
+  renderCameraOptions(videoDevices);
+  updateCameraControls();
+}
+
+async function switchCameraTrackIfNeeded() {
+  if (state.connectedRole !== SESSION_ROLE_SENDER
+      || !state.peerConnection
+      || !state.localStream) {
+    return;
+  }
+
+  const requestedDeviceId = selectedCameraDeviceId();
+  const currentVideoTrack = state.localStream.getVideoTracks()[0];
+  const currentDeviceId = currentVideoTrack?.getSettings?.().deviceId || "";
+  if (requestedDeviceId === currentDeviceId) {
+    return;
+  }
+
+  state.camera.switching = true;
+  updateCameraControls();
+  setStatus("Caméra", "Bascule vers la caméra sélectionnée...");
+
+  try {
+    const replacementStream = await requestLocalStream(requestedDeviceId);
+    const [replacementAudioTrack] = replacementStream.getAudioTracks();
+    const [replacementVideoTrack] = replacementStream.getVideoTracks();
+    if (!replacementAudioTrack || !replacementVideoTrack) {
+      throw new Error("Le flux caméra de remplacement est incomplet.");
+    }
+
+    const audioSender = state.peerConnection.getSenders().find(
+        (sender) => sender.track?.kind === "audio",
+    );
+    const videoSender = state.peerConnection.getSenders().find(
+        (sender) => sender.track?.kind === "video",
+    );
+    await Promise.all([
+      audioSender?.replaceTrack(replacementAudioTrack),
+      videoSender?.replaceTrack(replacementVideoTrack),
+    ]);
+
+    state.localStream.getTracks().forEach((track) => track.stop());
+    state.localStream = replacementStream;
+    elements.preview.srcObject = replacementStream;
+    state.camera.selectedDeviceId = selectedCameraDeviceId();
+    setStatus("Sender", "Caméra active mise à jour.");
+  } finally {
+    state.camera.switching = false;
+    updateCameraControls();
   }
 }
 
@@ -435,6 +589,7 @@ function updateProtectedControls() {
     elements.arduinoConnectButton.disabled = !canControl;
     elements.arduinoDisconnectButton.disabled = !canControl;
   }
+  updateCameraControls();
 }
 
 function syncObjectSearchVisionModelSelector(status) {
@@ -726,6 +881,9 @@ function getModeLabel(mode) {
   if (mode === "eating") {
     return "Eating";
   }
+  if (mode === "writing") {
+    return "Writing";
+  }
   if (mode === "object_search") {
     return "Object Search";
   }
@@ -741,7 +899,9 @@ function applyModeStatus(status) {
     status?.detail
     || (mode === "object_search"
       ? "Recherche d'objet en cours."
-      : (mode === "eating" ? "Mode repas actif." : "Mode idle."))
+      : (mode === "eating"
+        ? "Mode repas actif."
+        : (mode === "writing" ? "Mode ecriture actif." : "Mode idle.")))
   );
   renderObjectSearchGuideLine();
 }
@@ -1261,7 +1421,7 @@ async function requestJson(url, options = {}) {
   return payload;
 }
 
-async function requestLocalStream() {
+async function requestLocalStream(cameraDeviceId = "") {
   const preferredConstraints = {
     audio: {
       channelCount: { ideal: 1 },
@@ -1269,7 +1429,7 @@ async function requestLocalStream() {
       noiseSuppression: true,
       autoGainControl: true,
     },
-    video: buildVideoConstraints(),
+    video: buildVideoConstraints(cameraDeviceId),
   };
 
   try {
@@ -1457,8 +1617,11 @@ async function connect() {
 
   try {
     if (state.requestedRole === SESSION_ROLE_SENDER) {
-      state.localStream = await requestLocalStream();
+      state.localStream = await requestLocalStream(selectedCameraDeviceId());
       elements.preview.srcObject = state.localStream;
+      await refreshCameraDevices().catch((error) => {
+        console.error(error);
+      });
     } else {
       state.localStream = null;
       state.remoteStream = new MediaStream();
@@ -1806,6 +1969,24 @@ elements.roleSelect.addEventListener("change", (event) => {
   state.requestedRole = event.target.value;
   clearError();
   updateProtectedControls();
+  updateCameraControls();
+});
+
+elements.cameraSelect.addEventListener("change", (event) => {
+  state.camera.selectedDeviceId = event.target.value || "";
+  if (state.connectedRole === SESSION_ROLE_SENDER) {
+    switchCameraTrackIfNeeded().catch((error) => {
+      console.error(error);
+      showError(error.message || "Impossible de changer de caméra.");
+    });
+  }
+});
+
+elements.refreshCamerasButton.addEventListener("click", () => {
+  refreshCameraDevices().catch((error) => {
+    console.error(error);
+    showError("Impossible d'actualiser la liste des caméras.");
+  });
 });
 
 elements.objectSearchVisionModelSelect.addEventListener("change", (event) => {
@@ -1919,6 +2100,7 @@ window.addEventListener("beforeunload", () => {
 
 updateVoiceDebugVisibility();
 state.requestedRole = selectedRole();
+updateCameraControls();
 renderObjectSearchVisionModelOptions();
 resetVoiceState();
 resetObjectSearchState();
@@ -1932,6 +2114,18 @@ updateProtectedControls();
 fetchStatus().catch(() => {
   setStatus("Serveur", "Le serveur est pret, mais le statut initial n'a pas pu etre lu.");
 });
+
+refreshCameraDevices().catch((error) => {
+  console.error(error);
+});
+
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", () => {
+    refreshCameraDevices().catch((error) => {
+      console.error(error);
+    });
+  });
+}
 
 fetchVoiceStatus().catch(() => {
   elements.voiceAvailabilityDetail.textContent =

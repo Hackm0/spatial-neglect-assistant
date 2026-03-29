@@ -22,6 +22,10 @@ class EatingDetectionResult:
   is_eating: bool
   one_side_food_remaining: bool
   remaining_side: str
+  paper_visible: bool
+  is_writing: bool
+  one_side_writing: bool
+  writing_side: str
 
 
 class EatingDetectorPort(Protocol):
@@ -131,12 +135,18 @@ class OpenAiEatingDetector(EatingDetectorPort):
                     {
                         "type": "input_text",
                         "text": (
-                            "Analyse cette image d'un repas. Reponds strictement au schema JSON. "
+                          "Analyse cette image (repas ou ecriture sur feuille). "
+                          "Reponds strictement au schema JSON. "
                             "plateVisible=true si une assiette est clairement visible. "
                             "isEating=true si la personne semble actuellement en train de manger. "
                             "oneSideFoodRemaining=true seulement si la nourriture semble rester "
                             "principalement d'un seul cote de l'assiette (gauche ou droite). "
-                            "remainingSide doit etre one of: left, right, none, unknown."
+                          "remainingSide doit etre one of: left, right, none, unknown. "
+                          "paperVisible=true si une feuille de papier est clairement visible. "
+                          "isWriting=true si la personne semble ecrire sur la feuille. "
+                          "oneSideWriting=true seulement si l'ecriture est surtout d'un seul "
+                          "cote de la feuille. "
+                          "writingSide doit etre one of: left, right, none, unknown."
                         ),
                     },
                     {
@@ -161,12 +171,23 @@ class OpenAiEatingDetector(EatingDetectorPort):
                             "type": "string",
                             "enum": ["left", "right", "none", "unknown"],
                         },
+                        "paperVisible": {"type": "boolean"},
+                        "isWriting": {"type": "boolean"},
+                        "oneSideWriting": {"type": "boolean"},
+                        "writingSide": {
+                          "type": "string",
+                          "enum": ["left", "right", "none", "unknown"],
+                        },
                     },
                     "required": [
                         "plateVisible",
                         "isEating",
                         "oneSideFoodRemaining",
                         "remainingSide",
+                        "paperVisible",
+                        "isWriting",
+                        "oneSideWriting",
+                        "writingSide",
                     ],
                     "additionalProperties": False,
                 },
@@ -221,6 +242,10 @@ class OpenAiEatingDetector(EatingDetectorPort):
     is_eating = response_payload.get("isEating")
     one_side_food_remaining = response_payload.get("oneSideFoodRemaining")
     remaining_side = _coerce_string(response_payload.get("remainingSide"))
+    paper_visible = response_payload.get("paperVisible")
+    is_writing = response_payload.get("isWriting")
+    one_side_writing = response_payload.get("oneSideWriting")
+    writing_side = _coerce_string(response_payload.get("writingSide"))
 
     if not isinstance(plate_visible, bool):
       raise RuntimeError("OpenAI a retourne plateVisible invalide.")
@@ -230,10 +255,22 @@ class OpenAiEatingDetector(EatingDetectorPort):
       raise RuntimeError("OpenAI a retourne oneSideFoodRemaining invalide.")
     if remaining_side not in {"left", "right", "none", "unknown"}:
       raise RuntimeError("OpenAI a retourne remainingSide invalide.")
+    if not isinstance(paper_visible, bool):
+      raise RuntimeError("OpenAI a retourne paperVisible invalide.")
+    if not isinstance(is_writing, bool):
+      raise RuntimeError("OpenAI a retourne isWriting invalide.")
+    if not isinstance(one_side_writing, bool):
+      raise RuntimeError("OpenAI a retourne oneSideWriting invalide.")
+    if writing_side not in {"left", "right", "none", "unknown"}:
+      raise RuntimeError("OpenAI a retourne writingSide invalide.")
 
     return EatingDetectionResult(
         plate_visible=plate_visible,
         is_eating=is_eating,
         one_side_food_remaining=one_side_food_remaining,
         remaining_side=remaining_side,
+        paper_visible=paper_visible,
+        is_writing=is_writing,
+        one_side_writing=one_side_writing,
+        writing_side=writing_side,
     )

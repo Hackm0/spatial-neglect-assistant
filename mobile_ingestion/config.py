@@ -125,6 +125,8 @@ class AppConfig:
   mode_idle_check_interval_seconds: float = 15.0
   mode_eating_check_interval_seconds: float = 5.0
   mode_eating_streak_required: int = 2
+  mode_writing_check_interval_seconds: float = 1.0
+  mode_writing_streak_required: int = 1
   mode_eating_vibration_seconds: float = 3.0
   mode_eating_vibration_cooldown_seconds: float = 5.0
   mode_object_search_completion_seconds: float = 3.0
@@ -206,6 +208,12 @@ class AppConfig:
         "mode_eating_streak_required": int(
           os.getenv("MOBILE_INGEST_MODE_EATING_STREAK_REQUIRED",
                 defaults.mode_eating_streak_required)),
+        "mode_writing_check_interval_seconds": float(
+          os.getenv("MOBILE_INGEST_MODE_WRITING_CHECK_INTERVAL_SECONDS",
+                defaults.mode_writing_check_interval_seconds)),
+        "mode_writing_streak_required": int(
+          os.getenv("MOBILE_INGEST_MODE_WRITING_STREAK_REQUIRED",
+                defaults.mode_writing_streak_required)),
         "mode_eating_vibration_seconds": float(
           os.getenv("MOBILE_INGEST_MODE_EATING_VIBRATION_SECONDS",
                 defaults.mode_eating_vibration_seconds)),
@@ -241,6 +249,7 @@ class AppConfig:
             "port",
             "voice_transcript_buffer_size",
             "mode_eating_streak_required",
+            "mode_writing_streak_required",
         }:
           values[normalized_key] = int(value)
         elif normalized_key in {
@@ -253,6 +262,7 @@ class AppConfig:
             "object_search_command_timeout_seconds",
             "mode_idle_check_interval_seconds",
             "mode_eating_check_interval_seconds",
+            "mode_writing_check_interval_seconds",
             "mode_eating_vibration_seconds",
             "mode_eating_vibration_cooldown_seconds",
             "mode_object_search_completion_seconds",

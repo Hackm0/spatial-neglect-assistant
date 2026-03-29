@@ -469,6 +469,10 @@ class RuntimeModeStatusDto:
   is_eating: bool | None
   one_side_food_remaining: bool | None
   remaining_side: str | None
+  paper_visible: bool | None
+  is_writing: bool | None
+  one_side_writing: bool | None
+  writing_side: str | None
   last_updated_at: str | None
 
   @classmethod
@@ -484,6 +488,10 @@ class RuntimeModeStatusDto:
         is_eating=status.is_eating,
         one_side_food_remaining=status.one_side_food_remaining,
         remaining_side=status.remaining_side,
+        paper_visible=status.paper_visible,
+        is_writing=status.is_writing,
+        one_side_writing=status.one_side_writing,
+        writing_side=status.writing_side,
         last_updated_at=(status.last_updated_at.isoformat()
                          if status.last_updated_at is not None else None),
     )
@@ -500,6 +508,10 @@ class RuntimeModeStatusDto:
         "isEating": self.is_eating,
         "oneSideFoodRemaining": self.one_side_food_remaining,
         "remainingSide": self.remaining_side,
+        "paperVisible": self.paper_visible,
+        "isWriting": self.is_writing,
+        "oneSideWriting": self.one_side_writing,
+        "writingSide": self.writing_side,
         "lastUpdatedAt": self.last_updated_at,
     }
 

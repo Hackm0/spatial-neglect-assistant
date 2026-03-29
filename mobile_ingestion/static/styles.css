@@ -171,6 +171,18 @@ h1 {
   margin-bottom: 18px;
 }
 
+.camera-selector-row {
+  align-items: center;
+  margin-bottom: 18px;
+}
+
+.compact-action-button {
+  flex: 0 0 auto;
+  min-width: 120px;
+  min-height: 46px;
+  padding: 0 14px;
+}
+
 .object-search-model-label {
   min-width: 170px;
   font-weight: 700;
@@ -418,5 +430,15 @@ input[type="range"] {
   .debug-stats,
   .telemetry-grid {
     grid-template-columns: 1fr;
+  }
+
+  .camera-selector-row .object-search-model-label {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .camera-selector-row .object-search-model-select,
+  .camera-selector-row .compact-action-button {
+    width: 100%;
   }
 }
